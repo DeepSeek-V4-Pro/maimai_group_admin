@@ -1,0 +1,77 @@
+[plugin]
+enabled = false
+config_version = "1.0.0"
+
+[admin]
+admins = []
+allow_group_owner = true
+owner_allowed_commands = []
+deny_response = "silent"
+
+[identity]
+bot_nickname = "麦麦"
+auto_detect = true
+bot_qq = ""
+
+[identity.override_roles]
+
+[auto_moderate]
+enabled = true
+mode = "inline"
+throttle_seconds = 5
+re_inject_interval_messages = 10
+re_inject_interval_seconds = 1800
+enabled_groups = []
+
+[safeguard]
+max_mute_duration = 3600
+kick_require_confirm = true
+mute_cooldown = 300
+daily_mute_limit = 10
+daily_kick_limit = 3
+protected_users = []
+auto_exempt_admins = true
+
+[safeguard.exempt_users]
+
+[warning]
+enabled = true
+spam_warn_threshold = 3
+spam_warn_window = 600
+abuse_warn_threshold = 1
+abuse_warn_window = 3600
+ad_warn_threshold = 1
+ad_warn_window = 1800
+
+[escalation]
+enabled = true
+escalation_steps = []
+
+[notification]
+public_notify = true
+public_style = "playful"
+admin_dm_on_severe = true
+daily_summary = false
+
+[auto_approve]
+enabled = false
+default_action = "ignore"
+require_message_keywords = []
+reject_keywords = []
+max_pending_seconds = 300
+daily_approve_limit = 5
+daily_reject_limit = 10
+check_interval_seconds = 120
+
+[logging]
+max_log_entries = 200
+log_skip_decisions = false
+default_log_lines = 10
+
+[prompts]
+auto_moderate_system = "【角色】你是本群的{bot_role}「{bot_nickname}」，拥有群管理权限。\n  可用操作: {available_actions}\n\n【职责】实时监控群聊，对违规行为采取渐进式处罚：口头提醒 → 正式警告 → 禁言 → 踢出。\n\n【处罚标准】\n  广告/诈骗/钓鱼链接 → 立即撤回 + 禁言 10~30 分钟\n  刷屏(连续5+条相同/相似内容) → 先口头提醒，继续刷则禁言 5~10 分钟\n  人身攻击/辱骂/引战 → 撤回 + 禁言 1~6 小时，24h 内再犯直接踢出\n  色情/血腥/违法内容 → 立即撤回 + 踢出(零容忍)\n  恶意刷表情/长图刷屏 → 口头提醒后禁言 5~10 分钟\n  高质量内容、技术分享、精彩创作 → 可设精华鼓励\n  轻微擦边/不确定内容 → 仅观察，不主动操作\n\n【操作流程】\n  1. 确认目标: 调用 group_get_member 查身份(系统会自动拦截对群主/管理员的操作)\n  2. 轻微违规: 先用 group_warn_user 发正式警告(violation_type: spam/abuse/ad)\n  3. 升级处罚: 警告无效再禁言，严重违规直接禁言或踢出\n  4. 撤回消息: 需要 message_id 时引导群成员先回复违规消息再调用 group_recall_msg\n  5. 忽略: 无需操作时直接跳过，不要生成\"审查完毕/无异常\"之类的回复\n"
+mute_response_style = "活泼俏皮，用「小黑屋」「禁言套餐」等趣味表达，附带原因和时长"
+kick_response_style = "严肃但不凶，说明踢出原因"
+essence_response_style = "简洁夸奖，肯定分享价值"
+admin_notify_template = "【管理操作通知】\n群：{group_name}({group_id})\n操作：{action}\n目标：{target_name}({target_id})\n原因：{reason}\n操作者：{operator}\n时间：{timestamp}"
+command_denied_message = "你没有权限执行此操作。"

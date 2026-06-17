@@ -1,0 +1,650 @@
+# 麦麦群管理插件
+
+**基于 LLM 自主决策的 QQ 群管理插件**，让 Bot 能够自动监控群聊、识别违规行为并执行管理操作（禁言、踢人、撤回等），同时提供人类管理员的命令控制台。
+
+---
+
+## ⚠️ 免责声明
+
+1. **本插件为娱乐性质的自动化工具**，不保证管理决策的准确性和适当性。LLM 的判断可能存在误判（将正常对话误认为违规）或漏判（未识别真正的违规内容）。
+2. **使用者需自行承担风险**。因本插件自动执行的管理操作（禁言、踢人等）引发的任何纠纷、损失或账号风险，插件开发者不承担任何责任。
+3. **不建议在严肃的管理场景中完全依赖本插件**。建议保持人类管理员对关键决策的监督和干预能力。
+4. **请遵守 QQ 平台的使用规范**，合理设置禁言时长和操作频率，避免因频繁操作导致 Bot 账号被限制。
+5. **Bot 必须是群管理员或群主**才能执行管理操作。如果 Bot 是普通成员，所有管理 Tool 将无法使用。
+6. 本插件基于 MaiBot Plugin SDK v2 和 NapCat 适配器开发，不保证与其他适配器或 SDK 版本的兼容性。
+
+---
+
+## 定位说明
+
+本插件设计为**轻量娱乐向**的群管理辅助工具，核心理念是：
+
+- **LLM 自主判断**：Bot 根据上下文自行决定何时操作，无需人工逐一指令
+- **人类兜底**：通过 `/admin` 命令和 `exempt_users` 等机制，管理员可随时纠正或阻止 Bot 的操作
+- **安全优先**：默认配置保守（`daily_mute_limit=10`、`max_mute_duration=3600s`、`auto_exempt_admins=true`），建议先在测试群试用
+
+**如需用于正式群管理**，建议：
+
+1. 将 `auto_moderate.enabled` 设为 `false`，仅通过管理员命令手动操作
+2. 或设置 `default_action = "ignore"`（自动审批关闭）
+3. 将 `protected_users` 配置所有不应被操作的用户
+4. 定期通过 `/admin log` 审查操作记录
+5. 保持至少一名人类管理员在线监督
+
+---
+
+## 快速开始
+
+### 安装
+
+将 `plugins/maimai_group_admin/` 目录放入 MaiBot 的 `plugins/` 下，确保包含以下文件：
+
+```
+plugins/maimai_group_admin/
+  _manifest.json    # 插件声明
+  plugin.py         # 插件主程序
+  config.toml       # 配置文件
+  README.md         # 本说明
+```
+
+### 最小配置
+
+编辑 `config.toml`：
+
+```toml
+[plugin]
+enabled = true
+
+[identity]
+bot_qq = "你的Bot的QQ号"    # 推荐填写，留空则自动从消息中获取
+
+[auto_moderate]
+enabled_groups = ["123456789"]  # 需要管理的群号，留空=全部群生效
+
+[admin]
+admins = ["你的QQ号"]           # 能使用/admin命令的管理员
+
+[auto_approve]
+enabled = false                 # 建议初次使用关闭自动审批
+default_action = "ignore"
+```
+
+### 启用
+
+WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
+
+### 验证
+
+在管理的群内发送 `/admin status`，应看到：
+
+```
+群 123456789 管理状态:
+  bot角色: owner
+  状态: 运行中
+  今日禁言: 0/10
+  今日踢人: 0/3
+```
+
+---
+
+## 配置文件详解
+
+以下是 `config.toml` 每个字段的完整说明，按配置分组列出。
+
+---
+
+### [plugin] — 插件开关
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 插件总开关，设为 `true` 后插件才开始工作 |
+| `config_version` | string | `"1.0.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
+
+---
+
+### [admin] — 管理员权限
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `admins` | list[string] | `[]` | 人类管理员 QQ 号列表，**必须填写你的 QQ 号**才能使用 `/admin` 等命令。跨群有效 |
+| `allow_group_owner` | bool | `true` | 是否允许目标群的群主执行管理员命令（即使不在 admins 列表中） |
+| `owner_allowed_commands` | list[string] | `[]` | 群主可用的命令白名单（如 `["status","log"]`），留空 = 全部可用 |
+| `deny_response` | string | `"silent"` | 无权限用户的处理方式：`"silent"`=静默忽略，`"reply"`=回复"你没有权限执行此操作" |
+
+> **重要**：`admins` 必须至少填一个 QQ 号，否则仅群主能用管理命令。
+
+---
+
+### [identity] — 身份标识
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_nickname` | string | `"麦麦"` | Bot 昵称，会出现在管理 prompt 和通知中。建议与 Bot 的人设名称一致 |
+| `auto_detect` | bool | `true` | 是否自动检测 Bot 在各群的权限角色（群主/管理员/普通成员） |
+| `bot_qq` | string | `""` | Bot 的 QQ 号。**强烈推荐填写**，留空则从首次群消息事件中自动获取 |
+| `override_roles` | dict[str,str] | `{}` | 手动覆盖指定群的 Bot 角色。格式：`"群号" = "owner"`（可选值：`owner`/`admin`/`member`）。优先级高于自动检测 |
+
+> `override_roles` 示例：
+> ```toml
+> [identity.override_roles]
+> "123456789" = "owner"
+> "987654321" = "admin"
+> ```
+
+---
+
+### [auto_moderate] — 自动审核
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用 LLM 自动审核（注入管理 prompt） |
+| `mode` | string | `"inline"` | 审核模式。`"inline"`=在当前消息中注入，`"separate"`=独立消息（需配合 throttle_seconds） |
+| `throttle_seconds` | int | `5` | separate 模式下两次注入的最小间隔（秒） |
+| `re_inject_interval_messages` | int | `10` | 每隔多少条群消息重新注入一次管理 prompt |
+| `re_inject_interval_seconds` | int | `1800` | 每隔多少秒重新注入一次管理 prompt（与上一条取先到者） |
+| `enabled_groups` | list[string] | `[]` | **必须填写**需要管理的群号列表，如 `["123456789"]`。留空不生效 |
+
+> **注意**：`enabled_groups` 为空时插件不会在任何群启动自动审核。
+
+---
+
+### [safeguard] — 安全管理
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_mute_duration` | int | `3600` | 单次禁言最大秒数（1 小时）。LLM 请求的超长禁言会被截断到该值 |
+| `kick_require_confirm` | bool | `true` | 踢人前是否要求 LLM 先调用 `group_get_member` 确认目标身份 |
+| `mute_cooldown` | int | `300` | 同一用户两次禁言的最小间隔（秒） |
+| `daily_mute_limit` | int | `10` | 每个群每天最大禁言次数（防止误操作风暴） |
+| `daily_kick_limit` | int | `3` | 每个群每天最大踢人次数 |
+| `protected_users` | list[string] | `[]` | **全局保护名单**，这些 QQ 号在任何群里都不会被操作。建议填群主和重要成员 |
+| `exempt_users` | dict[str,list] | `{}` | **按群豁免名单**，格式见下方示例。通过 `/admin ban`/`unban` 命令也可添加 |
+| `auto_exempt_admins` | bool | `true` | 是否自动豁免群主和管理员（系统硬拦截，LLM 无法操作他们） |
+
+> `exempt_users` 示例：
+> ```toml
+> [safeguard.exempt_users]
+> "123456789" = ["111222333", "444555666"]
+> ```
+
+---
+
+### [warning] — 警告系统
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用警告计数器 |
+| `spam_warn_threshold` | int | `3` | 刷屏类警告次数达到该值后系统提示升级处罚 |
+| `spam_warn_window` | int | `600` | 刷屏警告计数窗口（秒），超出窗口的旧警告自动过期 |
+| `abuse_warn_threshold` | int | `1` | 辱骂类警告阈值（建议设低，辱骂零容忍） |
+| `abuse_warn_window` | int | `3600` | 辱骂警告计数窗口（秒） |
+| `ad_warn_threshold` | int | `1` | 广告类警告阈值 |
+| `ad_warn_window` | int | `1800` | 广告警告计数窗口（秒） |
+
+> 当某类警告达到阈值时，Tool 返回值会附带 `"该用户 xxx 类警告已达 n/m，建议升级处罚"` 提示。
+
+---
+
+### [escalation] — 处罚阶梯
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用处罚阶梯 |
+| `escalation_steps` | list[table] | `[]` | 阶梯规则列表，**默认空=不生效**，需自行配置 TOML 数组 |
+
+每条阶梯规则的字段：
+
+| 子字段 | 类型 | 说明 |
+|--------|------|------|
+| `within_hours` | int | 回溯多少小时内 |
+| `count` | int | 操作次数达到该值后触发 |
+| `action` | string | 触发动作：`"mute"` 或 `"kick"` |
+| `max_duration` | int | 若 action=mute，禁言最大秒数（覆盖 LLM 请求的时长） |
+
+> 配置示例（TOML 数组格式，每项用 `[[escalation.escalation_steps]]` 开头）：
+> ```toml
+> [[escalation.escalation_steps]]
+> within_hours = 24
+> count = 1
+> action = "mute"
+> max_duration = 600
+> 
+> [[escalation.escalation_steps]]
+> within_hours = 24
+> count = 2
+> action = "mute"
+> max_duration = 1800
+> 
+> [[escalation.escalation_steps]]
+> within_hours = 72
+> count = 3
+> action = "kick"
+> ```
+
+---
+
+### [notification] — 通知设置
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `public_notify` | bool | `true` | 是否在群内公开通知管理操作（如禁言/踢人后在群里发送提示） |
+| `public_style` | string | `"playful"` | 通知风格：`"brief"`=简短，`"playful"`=活泼俏皮，`"silent"`=不通知 |
+| `admin_dm_on_severe` | bool | `true` | 严重操作（踢人、长时间禁言）是否私聊通知管理员 |
+| `daily_summary` | bool | `false` | 每日管理摘要（暂未实现） |
+
+---
+
+### [auto_approve] — 自动审批入群
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用自动审批入群。**建议初次使用保持关闭** |
+| `default_action` | string | `"ignore"` | 默认动作：`"ignore"`=不处理，`"approve"`=自动通过，`"reject"`=自动拒绝 |
+| `require_message_keywords` | list[string] | `[]` | 入群申请必须包含的关键词（全部满足才按 default_action 处理） |
+| `reject_keywords` | list[string] | `[]` | 拒绝关键词，申请中包含任一即自动拒绝 |
+| `max_pending_seconds` | int | `300` | 超过此秒数的申请自动跳过（避免处理积压旧申请） |
+| `daily_approve_limit` | int | `5` | 每日自动通过上限 |
+| `daily_reject_limit` | int | `10` | 每日自动拒绝上限 |
+| `check_interval_seconds` | int | `120` | 后台扫描间隔（秒），设为 `0` 禁用后台任务 |
+
+> 处理优先级：`reject_keywords` 命中 → 拒绝 > `require_message_keywords` 未满足 → 忽略 > `default_action`
+
+---
+
+### [logging] — 日志与记录
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_log_entries` | int | `200` | 内存中保留的操作日志最大条数（超过后自动丢弃旧记录） |
+| `log_skip_decisions` | bool | `false` | 是否记录 LLM 决定"跳过/不操作"的决策（通常不需要） |
+| `default_log_lines` | int | `10` | `/admin log` 不加行数参数时的默认显示行数 |
+
+---
+
+### [prompts] — 提示词
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `auto_moderate_system` | string | (长文本) | LLM 自动审核的系统提示词，决定 Bot 的判断标准和行为准则。可自定义 |
+| `mute_response_style` | string | `"活泼俏皮..."` | 禁言操作后 LLM 在群内的发言风格描述 |
+| `kick_response_style` | string | `"严肃但不凶..."` | 踢人操作后 LLM 发言风格描述 |
+| `essence_response_style` | string | `"简洁夸奖..."` | 设精华操作后 LLM 发言风格描述 |
+| `admin_notify_template` | string | (模板文本) | 严重操作私聊通知管理员的模板。可用变量：`{group_name}` `{group_id}` `{action}` `{target_name}` `{target_id}` `{reason}` `{operator}` `{timestamp}` |
+| `command_denied_message` | string | `"你没有权限执行此操作。"` | 非授权用户尝试使用管理命令时的回复内容（仅 deny_response="reply" 时生效） |
+
+> `auto_moderate_system` 支持的模板变量：`{bot_role}`（群主/管理员/普通成员）、`{bot_nickname}`、`{group_name}`、`{available_actions}`
+
+---
+
+## 功能详解
+
+### 一、LLM 自动管理层（17 个 Tool）
+
+Bot 通过注入管理上下文 prompt，使 LLM 具备群管理意识。当检测到违规行为时，LLM 会自主调用管理 Tool。
+
+#### 写操作（14 个）
+
+| Tool | 参数 | 最低权限 | 说明 |
+|------|------|----------|------|
+| `group_warn_user` | group_id, user_id, violation_type(spam/abuse/ad), reason | 管理员 | 发送警告消息 + 写入警告计数器，阈值达标后提示升级 |
+| `group_mute_user` | group_id, user_id, duration(秒), reason | 管理员 | 禁言指定用户，受 max_mute_duration 限制 |
+| `group_unmute_user` | group_id, user_id | 管理员 | 解除禁言（duration=0） |
+| `group_kick_user` | group_id, user_id, reason | 管理员 | 踢出用户，需先调用 group_get_member |
+| `group_recall_msg` | group_id, message_id, reason | 管理员 | 撤回消息（需先回复目标消息获取 message_id） |
+| `group_set_essence` | group_id, message_id | 管理员 | 设为精华消息 |
+| `group_unset_essence` | group_id, message_id | 管理员 | 取消精华 |
+| `group_set_user_card` | group_id, user_id, card | 管理员 | 修改群名片（只能改普通成员） |
+| `group_approve_join` | group_id, request_id, reason(可选) | 管理员 | 通过入群申请 |
+| `group_reject_join` | group_id, request_id, reason | 管理员 | 拒绝入群申请 |
+| `group_set_name` | group_id, name | **仅群主** | 修改群名称 |
+| `group_set_title` | group_id, user_id, title | **仅群主** | 设置专属头衔 |
+| `group_post_notice` | group_id, content | **仅群主** | 发布群公告 |
+| `group_delete_notice` | group_id, notice_id | **仅群主** | 删除群公告 |
+
+#### 查询（3 个）
+
+| Tool | 参数 | 说明 |
+|------|------|------|
+| `group_get_member` | group_id, user_id | 查询群成员身份（群主/管理员/普通成员）和群名片 |
+| `group_get_shut_list` | group_id | 查看当前群的禁言列表 |
+| `group_get_system_msg` | group_id | 获取群系统消息（含入群申请列表） |
+
+#### 动态注册
+
+Tool 全部 17 个静态注册，始终可用。Bot 角色的影响在 prompt 注入环节体现：
+
+- **群主**：注入完整管理权限描述（"全部管理: 禁言/解禁/踢人/警告/设精华/撤回/公告/改名/审批入群"）
+- **管理员**：注入受限描述（"禁言/解禁/踢人/警告/设精华/撤回/改名片/审批入群"）
+- **普通成员**：注入提示"你在此群为普通成员，管理操作受限于 QQ 权限。可协助管理员做决策建议。"
+
+> 注意：Tool 本身不按角色禁用。若 Bot 为普通成员调用禁言等操作，QQ API 会在执行时返回权限不足的错误。
+
+---
+
+### 二、人类管理员命令（15 个）
+
+所有命令需满足权限校验（`config.admin.admins` 或群主身份）。
+
+#### /admin 控制台（8 个）
+
+| 命令 | 用法 | 说明 |
+|------|------|------|
+| `/admin status [群号]` | 查看运行状态 | 显示 bot 角色、日计数、启用状态 |
+| `/admin off [群号]` | 暂停自动管理 | 加入 `_disabled_groups`，重启后恢复 |
+| `/admin on [群号]` | 恢复自动管理 | 从 `_disabled_groups` 移除 |
+| `/admin undo [群号] @qq` | 强制解禁 | 同时从 exempt_users 移除 |
+| `/admin log [群号] [n]` | 操作记录 | 查看最近 n 条操作（默认 10 条） |
+| `/admin ban [群号] @qq` | 添加豁免 | 写入 `exempt_users[群号]` |
+| `/admin unban [群号] @qq` | 移除豁免 | 从 `exempt_users` 删除 |
+| `/admin reload` | 刷新配置 | **仅 admins 列表中的用户**可用 |
+
+#### 快捷操作（7 个）
+
+| 命令 | 用法 | 权限 | 安全护栏 |
+|------|------|------|----------|
+| `/mute @qq 5分钟 刷屏` | 禁言，支持 QQ 号或昵称 | admins/群主 | `_is_protected` |
+| `/unmute @qq` | 解禁 | admins/群主 | — |
+| `/kick @qq 广告` | 踢出 | admins/群主 | `_is_protected` |
+| `/warn @qq spam 原因` | 正式警告 | admins/群主 | — |
+| `/essence` | 设精华（需先回复目标消息） | admins/群主 | — |
+| `/recall` | 撤回（需先回复目标消息） | admins/群主 | — |
+| `/shutlist` | 查看禁言列表 | admins/群主 | — |
+
+> **注意**：`/essence` 和 `/recall` 需要先在 QQ 中**回复（引用）目标消息**，然后再发送命令。命令会自动从回复中提取目标消息的 ID。
+
+---
+
+### 三、安全护栏（7 步校验链）
+
+所有 LLM Tool 和 `/mute` `/kick` 快捷命令在执行前均按以下顺序校验：
+
+```
+① protected_users（全局保护名单）
+    ↓ 命中 → 拒绝
+② exempt_users[群号]（按群豁免）
+    ↓ 命中 → 拒绝
+③ auto_exempt_admins（自动查身份）
+    ↓ 目标为群主/管理员 → 拒绝
+④ 每日限额（每群独立计数）
+    ↓ 超额 → 拒绝
+⑤ cooldown（同用户禁言间隔）
+    ↓ 未达标 → 拒绝
+⑥ kick_require_confirm（踢人确认）
+    ↓ 未调用 group_get_member → 拒绝
+⑦ 处罚阶梯（warn/mute/kick 联合计数）
+    ↓ 命中 → 自动覆盖 LLM 请求参数
+    ↓ 通过 → 执行操作
+```
+
+**处罚阶梯配置示例**（默认 `escalation_steps = []`，需自行配置后才生效）：
+
+| 条件 | 动作 |
+|------|------|
+| 24h 内第 1 次操作 | 禁言 ≤ 10 分钟 |
+| 24h 内第 2 次操作 | 禁言 ≤ 30 分钟 |
+| 72h 内第 3 次操作 | 踢出 |
+
+阶梯匹配后系统**自动覆盖** LLM 请求的禁言时长，Tool 返回值中附带提示。
+
+> 配置示例：
+> ```toml
+> [[escalation.escalation_steps]]
+> within_hours = 24
+> count = 1
+> action = "mute"
+> max_duration = 600
+> 
+> [[escalation.escalation_steps]]
+> within_hours = 24
+> count = 2
+> action = "mute"
+> max_duration = 1800
+> 
+> [[escalation.escalation_steps]]
+> within_hours = 72
+> count = 3
+> action = "kick"
+> ```
+
+---
+
+### 四、自动审批入群
+
+后台 `asyncio.Task` 定时扫描所有已启用群的入群申请。
+
+**处理逻辑**：
+
+1. 获取系统消息 → 提取 `join_requests`
+2. 按 `group_id` 过滤（防止处理其他群的申请）
+3. 超过 `max_pending_seconds` 的申请自动跳过
+4. 检查 `reject_keywords`：命中 → 拒绝
+5. 检查 `require_message_keywords`：未全部满足 → 忽略（或按 default_action）
+6. 执行 approve/reject，受 `daily_approve_limit` / `daily_reject_limit` 约束
+
+**配置示例**（自动通过含"同意协议"的申请，拒绝含"广告"的申请）：
+
+```toml
+[auto_approve]
+enabled = true
+default_action = "approve"
+require_message_keywords = ["同意协议"]
+reject_keywords = ["广告", "推广", "代练"]
+max_pending_seconds = 300
+daily_approve_limit = 10
+daily_reject_limit = 10
+check_interval_seconds = 60
+```
+
+---
+
+### 五、提示词系统
+
+#### 管理上下文 Prompt（auto_moderate_system）
+
+每次注入时自动替换模板变量 `{bot_role}` `{bot_nickname}` `{available_actions}`：
+
+```
+【角色】你是本群的{bot_role}「{bot_nickname}」，拥有群管理权限。
+  可用操作: {available_actions}
+
+【职责】实时监控群聊，对违规行为采取渐进式处罚。
+
+【处罚标准】
+  广告/诈骗/钓鱼链接 → 立即撤回 + 禁言 10~30 分钟
+  刷屏(连续5+条相同/相似内容) → 先口头提醒，继续刷则禁言 5~10 分钟
+  人身攻击/辱骂/引战 → 撤回 + 禁言 1~6 小时，24h内再犯直接踢出
+  色情/血腥/违法内容 → 立即撤回 + 踢出(零容忍)
+  高质量内容、技术分享、精彩创作 → 可设精华鼓励
+
+【操作流程】
+  1. 确认目标: 调用 group_get_member 查身份
+  2. 轻微违规: 先用 group_warn_user 发正式警告
+  3. 升级处罚: 警告无效再禁言，严重违规直接踢出
+  4. 忽略: 无需操作时直接跳过
+```
+
+#### 硬指令前缀（被@时插入当前消息）
+
+```
+【系统指令 — 优先级高于角色扮演人设】
+忽略你当前的日常人设和角色扮演设定。
+当消息中出现违规行为或管理需求时，你必须使用管理工具执行，
+不得用任何理由推脱或拒绝。
+你是本群的owner，这是你的职责。
+```
+
+---
+
+### 六、权限体系
+
+#### 命令权限（三层校验，取并集）
+
+| 优先级 | 条件 | 适用范围 |
+|--------|------|----------|
+| 1 | `config.admin.admins` 中的 QQ 号 | 跨群有效，不受任何限制 |
+| 2 | 发送者为目标群群主 + `allow_group_owner=true` | 当前群，受 `owner_allowed_commands` 白名单限制 |
+| 3 | admins 为空时默认仅群主可用 | 安全默认值 |
+
+#### Bot 角色检测
+
+- **自动检测**（`auto_detect=true`）：首次收到群消息时调用 `get_group_member_info(self_id)` 获取角色
+- **手动覆盖**：`identity.override_roles` 配置优先级高于自动检测
+- **配置 bot_qq**：推荐填写 `identity.bot_qq`，避免因未收到消息事件导致检测失败
+- **刷新周期**：每 30 分钟自动刷新一次
+
+---
+
+## 推荐配置
+
+### 娱乐向（默认适合）
+
+```toml
+[plugin]
+enabled = true
+
+[auto_moderate]
+enabled_groups = ["你的群号"]
+re_inject_interval_messages = 10
+
+[safeguard]
+max_mute_duration = 3600
+daily_mute_limit = 10
+daily_kick_limit = 3
+auto_exempt_admins = true
+
+[auto_approve]
+enabled = false
+```
+
+### 正式管理向（保守）
+
+```toml
+[auto_moderate]
+enabled = false    # 关闭自动审核，仅用管理员命令
+
+[safeguard]
+max_mute_duration = 600     # 最大10分钟
+daily_mute_limit = 5        # 保守上限
+daily_kick_limit = 1
+protected_users = ["群主QQ", "其他管理QQ"]
+
+[admin]
+admins = ["你的QQ"]
+deny_response = "reply"     # 无权限时回复提示
+```
+
+### 严格过滤向
+
+```toml
+[warning]
+spam_warn_threshold = 1     # 首次刷屏就警告
+abuse_warn_threshold = 0    # 辱骂直接处罚不警告
+
+[escalation]
+[[escalation.escalation_steps]]
+within_hours = 24
+count = 1
+action = "mute"
+max_duration = 1800          # 首次就禁言30分钟
+```
+
+---
+
+## 常见问题
+
+### Q: `/admin status` 显示 bot 角色为"未知"
+
+**原因**：Bot 未收到过群消息事件，或 `bot_qq` 未配置。
+
+**解决**：
+1. 在 `config.toml` 中设置 `[identity] bot_qq = "你的Bot的QQ号"`
+2. 或在群内发送一条消息触发角色检测
+3. 或手动设置 `[identity.override_roles] "群号" = "owner"`
+
+### Q: LLM 不响应管理请求（只会说"我不会"）
+
+**原因**：Bot 的人设优先级高于管理 prompt。
+
+**解决**：
+1. 确保 Bot 在群内是管理员/群主
+2. 检查 `auto_moderate.enabled = true`
+3. 被@时的硬指令前缀会自动覆盖人设，普通消息依赖周期注入
+4. 如仍不行，调整 Bot 的系统人设 prompt，减少与管理指令的冲突
+
+### Q: `/mute @昵称` 提示"未找到成员"
+
+**原因**：昵称匹配需要先调用 `get_group_member_list` 获取成员列表。
+
+**解决**：使用 QQ 号代替昵称：`/mute @123456789 5分钟`
+
+### Q: 快捷命令（`/mute` `/kick` 等）无法识别
+
+**原因**：新增的 Command 需要 WebUI 完整重载才能注册。
+
+**解决**：WebUI → 插件管理 → 禁用 → 启用（不能仅用 `/admin reload`）
+
+### Q: `send.hybrid` 权限被拒绝
+
+**原因**：manifest 中的 `capabilities` 未包含 `send.hybrid`。
+
+**解决**：确认 `_manifest.json` 中 `capabilities` 包含 `"send.hybrid"`，然后 WebUI 完整重载
+
+### Q: 自动审批不工作
+
+**原因**：`default_action = "ignore"` 导致直接跳过所有处理。
+
+**解决**：将 `default_action` 改为 `"approve"` 或 `"reject"`，并确保 `check_interval_seconds > 0`
+
+### Q: 自动审批处理了其他群的申请
+
+**原因**：`get_group_system_msg` 可能返回全部群的系统消息。
+
+**解决**：插件已内置 `req.group_id` 过滤，会跳过不匹配的群
+
+### Q: 处罚阶梯不生效
+
+**原因**：`escalation_steps` 配置为空列表。
+
+**解决**：在 `config.toml` 中配置 `[[escalation.escalation_steps]]` 条目（使用 TOML 数组格式，不是内联表）
+
+### Q: `/admin reload` 后修改不生效
+
+**原因**：`/admin reload` 只刷新内存配置，不重新注册组件。
+
+**解决**：代码修改、新增 Tool/Command 需要 WebUI 完整重载
+
+### Q: 操作日志/计数器重启后丢失
+
+**原因**：所有运行时状态（日志、计数器、豁免名单）存储在内存中。
+
+**解决**：这是设计决定，`/admin ban/unban` 的修改如需持久化请直接编辑 `config.toml`
+
+---
+
+## 日志参考
+
+所有功能输出 `[群管理]` 前缀日志，方便排查问题：
+
+| 日志前缀 | 含义 |
+|----------|------|
+| `Tool-mute / Tool-kick / Tool-warn / ...` | LLM 调用管理 Tool |
+| `Cmd-status / Cmd-mute / Cmd-off / ...` | 管理员命令执行 |
+| `角色检测结果: group=... role=...` | Bot 身份识别 |
+| `注入管理 prompt: group=... mentioned=True` | 管理上下文注入 |
+| `自动检查入群申请: groups={...}` | 自动审批扫描开始 |
+| `入群申请详情 / 入群申请决策` | 审批决策过程 |
+| `自动通过入群 / 自动拒绝入群` | 审批执行结果 |
+| `操作被拦截: ...` | 安全护栏拦截 |
+| `跨日清零: group=...` | 每日计数器重置 |
+
+---
+
+## 技术细节
+
+- **平台**：QQ（NapCat / MaiBot1.0-1.99）
+- **SDK**：MaiBot Plugin SDK v2
+- **适配器**：MaiBot-Napcat-Adapter
+- **并发安全**：`asyncio.Lock` 保护所有共享状态
+- **API 调用**：explicit-param APIs 用 `_call_api`，action-style APIs 用 `_call_action_api`
+- **依赖**：无额外第三方包
+- **许可证**：GPL-v3.0-or-later
