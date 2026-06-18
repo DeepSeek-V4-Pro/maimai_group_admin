@@ -59,8 +59,8 @@ groups = []
 # [[auto_approve.groups]]
 # group_id = "123456789"
 # default_action = "approve"
-# require_keywords = []
-# reject_keywords = ["广告", "推广"]
+# require_keywords = ""
+# reject_keywords = "广告, 推广"
 # daily_approve_limit = 5
 # daily_reject_limit = 10
 

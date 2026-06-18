@@ -82,8 +82,8 @@ class EscalationSectionConfig(PluginConfigBase):
 class GroupApproveOverrideConfig(PluginConfigBase):
     group_id: str = Field(default="", description="群号")
     default_action: str = Field(default="ignore", description="默认动作: ignore/approve/reject")
-    require_keywords: list[str] = Field(default_factory=list, description="必须包含的关键词(留空=不过滤)")
-    reject_keywords: list[str] = Field(default_factory=list, description="拒绝关键词")
+    require_keywords: str = Field(default="", description="必须包含的关键词(逗号分隔, 留空=不过滤)")
+    reject_keywords: str = Field(default="", description="拒绝关键词(逗号分隔)")
     daily_approve_limit: int = Field(default=0, description="每日自动通过上限(0=使用全局)")
     daily_reject_limit: int = Field(default=0, description="每日自动拒绝上限(0=使用全局)")
 
@@ -432,7 +432,9 @@ class GroupAdminPlugin(MaiBotPlugin):
         aa = self.config.auto_approve
         for g in aa.groups:
             if str(g.group_id) == str(group_id):
-                return list(g.require_keywords), list(g.reject_keywords)
+                req = [k.strip() for k in g.require_keywords.split(",") if k.strip()] if g.require_keywords else []
+                rej = [k.strip() for k in g.reject_keywords.split(",") if k.strip()] if g.reject_keywords else []
+                return req, rej
         return aa.require_message_keywords, aa.reject_keywords
 
     def _get_aa_enabled_action(self, group_id: int) -> tuple[bool, str]:
@@ -1324,7 +1326,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         prompt = hard_prefix + self.config.prompts.auto_moderate_system
         prompt = prompt.replace("{bot_role}", role).replace("{bot_nickname}", self.config.identity.bot_nickname).replace("{group_name}", str(group_id)).replace("{available_actions}", "; ".join(available))
         try:
-            await self.ctx.maisaka.context.append(stream_id=stream_id, segments=[{"type": "text", "content": prompt}], visible_text=prompt, source_kind="plugin:maimai.group-admin")
+            await self.ctx.maisaka.context.append(stream_id=stream_id, segments=[{"type": "text", "content": prompt}], visible_text=prompt, source_kind="plugin:deepseek-v4-pro.maimai-group-admin")
         except Exception as e:
             self.ctx.logger.error(f"注入管理 prompt 失败: {e}")
         modified_message = None

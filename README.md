@@ -241,8 +241,8 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 |------|------|--------|------|
 | `group_id` | string | `""` | 群号 |
 | `default_action` | string | `"ignore"` | 默认动作: ignore/approve/reject |
-| `require_keywords` | list | `[]` | 必须包含的关键词 |
-| `reject_keywords` | list | `[]` | 拒绝关键词 |
+| `require_keywords` | string | `""` | 必须包含的关键词，逗号分隔 |
+| `reject_keywords` | string | `""` | 拒绝关键词，逗号分隔 |
 | `daily_approve_limit` | int | `0` | 每日通过上限（0=使用全局） |
 | `daily_reject_limit` | int | `0` | 每日拒绝上限（0=使用全局） |
 
@@ -251,7 +251,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 > [[auto_approve.groups]]
 > group_id = "123456789"
 > default_action = "approve"
-> reject_keywords = ["广告", "推广"]
+> reject_keywords = "广告, 推广"
 > daily_approve_limit = 5
 > daily_reject_limit = 10
 > 
