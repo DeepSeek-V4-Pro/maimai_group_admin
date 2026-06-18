@@ -45,6 +45,23 @@ ad_warn_window = 1800
 enabled = true
 escalation_steps = []
 
+# [[escalation.escalation_steps]]
+# within_hours = 24
+# count = 1
+# action = "mute"
+# max_duration = 600
+
+# [[escalation.escalation_steps]]
+# within_hours = 24
+# count = 2
+# action = "mute"
+# max_duration = 1800
+
+# [[escalation.escalation_steps]]
+# within_hours = 72
+# count = 3
+# action = "kick"
+
 [auto_approve]
 enabled = false
 default_action = "ignore"
@@ -54,7 +71,6 @@ max_pending_seconds = 300
 daily_approve_limit = 5
 daily_reject_limit = 10
 check_interval_seconds = 120
-groups = []
 
 # [[auto_approve.groups]]
 # group_id = "123456789"
@@ -65,7 +81,7 @@ groups = []
 # daily_reject_limit = 10
 
 [logging]
-max_log_entries = 200
+max_log_entries = 2000
 default_log_lines = 10
 
 [prompts]

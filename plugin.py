@@ -101,7 +101,7 @@ class AutoApproveSectionConfig(PluginConfigBase):
 
 class LoggingSectionConfig(PluginConfigBase):
     __ui_label__ = "日志与记录"; __ui_icon__ = "file-text"; __ui_order__ = 8
-    max_log_entries: int = Field(default=200, description="操作日志最大条数")
+    max_log_entries: int = Field(default=2000, description="操作日志最大条数")
     default_log_lines: int = Field(default=10, description="/admin log 默认行数")
 
 class PromptsSectionConfig(PluginConfigBase):
@@ -170,17 +170,19 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._daily_approve_count: dict[int, dict[str, int]] = {}
         self._daily_reject_count: dict[int, dict[str, int]] = {}
         self._warnings: dict[int, dict[str, list[tuple[float, int]]]] = {}
-        self._op_log: deque[dict[str, Any]] = deque(maxlen=200)
+        self._op_log: deque[dict[str, Any]] = deque(maxlen=5000)
         self._get_member_called: dict[int, set[int]] = {}
         self._last_mute_time: dict[tuple[int, int], float] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
         self._auto_check_task: Optional[asyncio.Task] = None
+        self._last_cleanup_time: float = 0
 
     # ===== 生命周期 =====
 
     async def on_load(self) -> None:
         if not self.config.plugin.enabled:
             return
+        self._ensure_op_log_capacity()
         self._start_auto_check()
 
     async def on_unload(self) -> None:
@@ -190,6 +192,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         if scope != "self":
             return
         self.set_plugin_config(config_data)
+        self._ensure_op_log_capacity()
         if version:
             self.ctx.logger.debug(f"群管理插件配置更新: {version}")
 
@@ -220,6 +223,7 @@ class GroupAdminPlugin(MaiBotPlugin):
             try:
                 await asyncio.sleep(interval)
                 await self._check_join_requests()
+                self._cleanup_memory()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -319,6 +323,49 @@ class GroupAdminPlugin(MaiBotPlugin):
         if not s: return 0
         try: return int(s)
         except ValueError: return 0
+
+    def _ensure_op_log_capacity(self):
+        """根据escalation配置计算所需最小日志容量并调整deque maxlen。"""
+        maxlen = max(self.config.logging.max_log_entries, 2000)
+        if self.config.escalation.enabled and self.config.escalation.escalation_steps:
+            max_hours = max((s.within_hours for s in self.config.escalation.escalation_steps), default=0)
+            groups = max(len(self.config.auto_moderate.enabled_groups), 5)
+            daily_ops = self.config.safeguard.daily_mute_limit + self.config.safeguard.daily_kick_limit + 30
+            days = int(max_hours / 24) + 1 if max_hours > 0 else 1
+            needed = int(groups * daily_ops * days * 1.5)
+            maxlen = max(maxlen, needed)
+        if self._op_log.maxlen is None or self._op_log.maxlen < maxlen:
+            self._op_log = deque(self._op_log, maxlen=maxlen)
+
+    def _cleanup_memory(self):
+        """清理过期内存数据：warnings 过期条目、known_roles/stream_to_group 上限裁剪。"""
+        now = time.time()
+        max_warn_window = max(
+            self.config.warning.spam_warn_window,
+            self.config.warning.abuse_warn_window,
+            self.config.warning.ad_warn_window,
+            3600,
+        )
+        keep_seconds = max_warn_window * 2
+        for uid in list(self._warnings.keys()):
+            for vtype in list(self._warnings[uid].keys()):
+                self._warnings[uid][vtype] = [
+                    (ts, c) for ts, c in self._warnings[uid][vtype]
+                    if now - ts <= keep_seconds
+                ]
+                if not self._warnings[uid][vtype]:
+                    del self._warnings[uid][vtype]
+            if not self._warnings[uid]:
+                del self._warnings[uid]
+        if len(self._known_roles) > 2000:
+            keys = list(self._known_roles.keys())
+            for k in keys[:-1000]:
+                del self._known_roles[k]
+        if len(self._stream_to_group) > 1000:
+            keys = list(self._stream_to_group.keys())
+            for k in keys[:-500]:
+                del self._stream_to_group[k]
+        self._last_cleanup_time = now
 
     def _get_group_role(self, group_id: int) -> Optional[str]:
         gid_str = str(group_id)
@@ -682,6 +729,9 @@ class GroupAdminPlugin(MaiBotPlugin):
                 return {"name": "group_kick_user", "content": "权限不足，仅群主可以踢人"}
             is_protected, msg = await self._is_protected(group_id, user_id)
             if is_protected: return {"name": "group_kick_user", "content": f"无法踢出: {msg}"}
+            esc = self._check_escalation(user_id)
+            if esc and esc.action == "mute":
+                return {"name": "group_kick_user", "content": f"处罚阶梯建议先禁言 {esc.max_duration} 秒而非直接踢出，请使用 group_mute_user"}
             sf = self.config.safeguard
             if sf.kick_require_confirm and user_id not in self._get_member_called.get(group_id, set()): return {"name": "group_kick_user", "content": "踢人前请先调用 group_get_member 确认目标身份"}
             today = self._today_key()
@@ -1173,10 +1223,23 @@ class GroupAdminPlugin(MaiBotPlugin):
             remain = int(sf.mute_cooldown - (time.time() - last_mute))
             await self.ctx.send.text(f"该用户 {remain} 秒前刚被禁言，请稍后再试", stream_id)
             return True, "", True
+        esc = self._check_escalation(qq)
+        if esc and esc.action == "kick":
+            await self.ctx.send.text(f"该用户 {esc.within_hours}h 内已被处罚 {esc.count} 次，建议使用 /kick 踢出", stream_id)
+            return True, "", True
+        if esc and esc.action == "mute":
+            duration = min(duration, esc.max_duration)
         duration = min(duration, sf.max_mute_duration)
+        await self._check_daily_reset(gid)
+        today = self._today_key()
+        self._daily_mute_count.setdefault(gid, {}).setdefault(today, 0)
+        if self._daily_mute_count[gid][today] >= sf.daily_mute_limit:
+            await self.ctx.send.text(f"今天已经禁言了 {sf.daily_mute_limit} 个用户，已达每日上限", stream_id)
+            return True, "", True
         ok, data = await self._call_api(api_name="adapter.napcat.group.set_group_ban", group_id=gid, user_id=qq, duration=duration)
         if ok:
             self._last_mute_time[mute_key] = time.time()
+            self._daily_mute_count[gid][today] += 1
             dur_min = duration // 60
             dur_str = f"{dur_min}分钟" if dur_min > 0 else f"{duration}秒"
             await self._send_at_text(stream_id, f"已将", qq, f"禁言 {dur_str}" + (f"（{reason}）" if reason else ""))
@@ -1211,9 +1274,20 @@ class GroupAdminPlugin(MaiBotPlugin):
         if not await self._check_admin_permission(stream_id, gid, kwargs): return True, "", True
         is_protected, msg = await self._is_protected(gid, qq)
         if is_protected: await self.ctx.send.text(f"操作被拦截: {msg}", stream_id); return True, "", True
+        esc = self._check_escalation(qq)
+        if esc and esc.action == "mute":
+            await self.ctx.send.text(f"处罚阶梯建议先禁言 {esc.max_duration} 秒而非直接踢出，请使用 /mute", stream_id)
+            return True, "", True
+        await self._check_daily_reset(gid)
+        today = self._today_key()
+        self._daily_kick_count.setdefault(gid, {}).setdefault(today, 0)
+        if self._daily_kick_count[gid][today] >= self.config.safeguard.daily_kick_limit:
+            await self.ctx.send.text(f"今天已经踢出了 {self.config.safeguard.daily_kick_limit} 个用户，已达每日上限", stream_id)
+            return True, "", True
         ok, data = await self._call_api(api_name="adapter.napcat.group.set_group_kick", group_id=gid, user_id=qq, reject_add_request=False)
         if ok:
             await self._send_at_text(stream_id, "已踢出", qq, reason if reason else "")
+            self._daily_kick_count[gid][today] += 1
             self._add_log(gid, "kick", qq, reason or "管理员命令", True)
         else: await self.ctx.send.text(f"踢出未能生效: {data}", stream_id)
         return True, "", True
@@ -1326,7 +1400,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         prompt = hard_prefix + self.config.prompts.auto_moderate_system
         prompt = prompt.replace("{bot_role}", role).replace("{bot_nickname}", self.config.identity.bot_nickname).replace("{group_name}", str(group_id)).replace("{available_actions}", "; ".join(available))
         try:
-            await self.ctx.maisaka.context.append(stream_id=stream_id, segments=[{"type": "text", "content": prompt}], visible_text=prompt, source_kind="plugin:deepseek-v4-pro.maimai-group-admin")
+            await self.ctx.maisaka.context.append(stream_id=stream_id, segments=[{"type": "text", "content": prompt}], visible_text=prompt, source_kind="plugin:maimai.group-admin")
         except Exception as e:
             self.ctx.logger.error(f"注入管理 prompt 失败: {e}")
         modified_message = None
@@ -1344,6 +1418,8 @@ class GroupAdminPlugin(MaiBotPlugin):
             modified_message["processed_plain_text"] = f"{instruction}\n{ppt}"
             modified_message["display_message"] = modified_message["processed_plain_text"]
         if self._msg_counter[group_id] > 100000: self._msg_counter[group_id] = 0
+        if time.time() - self._last_cleanup_time > 3600:
+            self._cleanup_memory()
         result = {"continue_processing": True}
         if modified_message: result["modified_message"] = modified_message
         return result

@@ -25,7 +25,6 @@
     "api.call",
     "send.text",
     "send.hybrid",
-    "config.get",
     "maisaka.context.append"
   ],
   "i18n": {
