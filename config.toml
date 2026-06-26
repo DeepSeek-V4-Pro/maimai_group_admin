@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "1.0.0"
+config_version = "1.3.0"
 
 [admin]
 admins = []
@@ -17,8 +17,6 @@ bot_qq = ""
 
 [auto_moderate]
 enabled = true
-re_inject_interval_messages = 10
-re_inject_interval_seconds = 1800
 enabled_groups = []
 
 [safeguard]

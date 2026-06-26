@@ -1,6 +1,6 @@
 # 群管理助手 — LLM 自主管理 QQ 群插件
 
-**v1.1 | 18 个管理 Tool + 15 条快捷命令 + 2 个 HookHandler 守门**，让 Bot 自主监控群聊、识别违规并执行管理操作（禁言、踢人、撤回、设精华、公告、审批入群等），同时提供人类管理员的命令控制台。
+**v1.3 | 18 个管理 Tool + 15 条快捷命令 + 3 个 HookHandler（双路注入 + 守门）**，让 Bot 自主监控群聊、识别违规并执行管理操作（禁言、踢人、撤回、设精华、公告、审批入群等），同时提供人类管理员的命令控制台。
 
 ---
 
@@ -98,7 +98,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 插件总开关，设为 `true` 后插件才开始工作 |
-| `config_version` | string | `"1.0.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
+| `config_version` | string | `"1.3.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
 
 ---
 
@@ -137,9 +137,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用 LLM 自动审核（注入管理 prompt） |
-| `re_inject_interval_messages` | int | `10` | 每隔多少条群消息重新注入一次管理 prompt |
-| `re_inject_interval_seconds` | int | `1800` | 每隔多少秒重新注入一次管理 prompt（与上一条取先到者） |
+| `enabled` | bool | `true` | 是否启用 LLM 自动审核（v1.3: 双路注入 extra_prompt + messages，每次 LLM 思考都注入） |
 | `enabled_groups` | list[string] | `[]` | **必须填写**需要管理的群号列表，如 `["123456789"]`。留空不生效 |
 
 > **注意**：`enabled_groups` 为空时插件不会在任何群启动自动审核。
@@ -276,7 +274,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `auto_moderate_system` | string | (长文本) | **v1.1 重写**为行为参考指南式 prompt，开头声明"保持原本人设"，强调融入语气而非切换管理员口吻。可自定义 |
+| `auto_moderate_system` | string | (长文本) | **v1.3 精简**为紧凑格式，约 220 中文字符，去除冗余修辞词。可自定义 |
 | `command_denied_message` | string | `"你没有权限执行此操作。"` | 非授权用户尝试使用管理命令时的回复内容（仅 deny_response="reply" 时生效） |
 
 > `auto_moderate_system` 支持的模板变量：`{bot_role}`（群主/管理员/普通成员）、`{available_actions}`（动态可用工具列表）
@@ -287,9 +285,9 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 
 ### 一、LLM 自动管理层（18 个 Tool + 2 个 HookHandler）
 
-Bot 通过 `maisaka.replyer.before_request` HookHandler 在每次生成回复前向 `extra_prompt` 注入管理上下文，使 LLM 在任何回复中都具备群管理意识。当检测到违规行为时，LLM 自主调用管理 Tool；回复后 `after_response` HookHandler 守门检查是否有不当管理行为。
+Bot 通过双路 HookHandler（`before_request → extra_prompt` + `before_model_request → messages`）在每次 LLM 思考时注入管理上下文，确保 Planner/Timing Gate/Replyer 全部具备管理意识。当检测到违规行为时，LLM 自主调用管理 Tool；回复后 `after_response` HookHandler 守门检查是否有不当管理行为。
 
-> **v1.1 变更**：提示词注入从 `EventHandler + context.append`（v1.0）迁移到 `HookHandler + extra_prompt`（v1.1），解决了注入内容被上下文冲淡、与人设 prompt 冲突的问题。
+> **v1.3 变更**：双路注入（extra_prompt + messages）彻底解决单个钩子点不全的问题。不再依赖 `before_request` 难以解析的 group_id，直接取配置中第一个已启用群的角色生成通用管理 prompt。
 
 #### 写操作（14 个）
 
@@ -451,50 +449,42 @@ check_interval_seconds = 60
 
 ### 五、提示词系统
 
-#### 注入架构（v1.1）
+#### 注入架构（v1.3）
 
 ```
-消息到达 → EventHandler(追踪: 映射群号/计数/角色缓存)
+消息到达 → EventHandler(追踪: 群号映射/计数/角色缓存)
                 │
-Replyer 生成回复前
+LLM 每次思考（Planner / Replyer / Timing Gate）
     ├── HookHandler: before_request → extra_prompt 注入管理 prompt
-    │       └── 每次回复都注入，确保 LLM 100% 可见
+    ├── HookHandler: before_model_request → messages 直注管理 prompt
+    │       └── 双路注入互相补充，确保所有子代理都看到管理上下文
     │
     └── HookHandler: after_response → 守门检查
             └── Bot 有管理权限却说"没权限"时自动替换回复
 ```
 
-#### 管理上下文 Prompt（auto_moderate_system）
-
-v1.1 重写为**行为参考指南**而非规章制度，明确要求保持人设、融入语气，避免与 Bot 的 persona prompt 冲突。
-
-注入时自动替换模板变量 `{bot_role}` `{available_actions}`：
+#### 管理上下文 Prompt（v1.3 精简版）
 
 ```
-【群管理行为参考 — 请在保持你原本人设和说话风格的前提下使用以下规则】
+【群管理参考 — 保持人设，融入语气，不要切换管理员口吻】
 
-你是本群的{bot_role}，拥有这些管理工具：{available_actions}。
+身份：{bot_role}  可用工具：{available_actions}
 
-违规处理参考（以人设语气自然执行，不要切换成'管理员口吻'）：
-  广告/诈骗链接 → 撤回，可视情况禁言10-30分钟
-  连续刷屏 → 用你的人设语气提醒一句，继续刷再禁言5-10分钟
-  辱骂/人身攻击 → 撤回，禁言1-6小时，再犯可踢出
-  色情/违法内容 → 撤回并踢出
-  高质量分享 → 可以用设精华的方式表达赞赏
-  不确定的擦边内容 → 先观察，别着急动手
+处理参考（以你的人设语气自然执行）：
+  广告/诈骗 → 撤回 + 禁言10-30分钟
+  连续刷屏 → 提醒一句，继续刷再禁言5-10分钟
+  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出
+  色情/违法 → 撤回 + 踢出
+  高质量分享 → 设精华表达赞赏
+  不确定 → 先观察，别着急动手
 
-操作提示：
-  警告和禁言直接调用工具，参数填 group_id 和 user_id
-  踢人前务必先调 group_get_member 确认目标身份
-  撤回和设精华需要 message_id，让用户回复目标消息后获取
+操作提示：警告/禁言填 group_id 和 user_id；踢人前先调 group_get_member；撤回/精华需
+用户回复目标消息后获取 message_id
 
-节奏控制：
-  正常聊天时做你自己，别主动进入'审查模式'
-  只在确实发现违规时才动用工具，不要生成'无异常'之类的报告
-  管理操作融入你的人设语气，不要说'已将xxx禁言'，用一个自然的方式带过就好
+节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过
 ```
 
-> **v1.0 vs v1.1**：v1.0 用 `【角色】【职责】【处罚标准】` 等规章制度式 prompt，易被 LLM 的 persona prompt 压制。v1.1 改用参考指南式 prompt，开头即声明"保持你原本人设和说话风格"，强调"融入人设语气""做你自己"。
+> **v1.3 精简**：默认 prompt 从 ~380 字压缩到 ~220 字。移除冗余短语如"请在保持你原本人设和说话风格的前提下使用以下规则""你可以""用你的"等，直接用简洁条目。
 
 ---
 
@@ -527,7 +517,6 @@ enabled = true
 
 [auto_moderate]
 enabled_groups = ["你的群号"]
-re_inject_interval_messages = 10
 
 [safeguard]
 max_mute_duration = 3600
@@ -664,7 +653,7 @@ max_duration = 1800          # 首次就禁言30分钟
 | `Tool-mute / Tool-kick / Tool-warn / ...` | LLM 调用管理 Tool |
 | `Cmd-status / Cmd-mute / Cmd-off / ...` | 管理员命令执行 |
 | `角色检测结果: group=... role=...` | Bot 身份识别 |
-| `注入管理 prompt: group=... role=...` | HookHandler 注入 extra_prompt（v1.1） |
+| `注入管理 prompt: group=... role=...` | HookHandler 直注 messages（v1.3，每次 LLM 思考都注入） |
 | `守门拦截: Bot(role=...)错误宣称无权限` | after_response 守门触发（v1.1） |
 | `守门改写回复: group=...` | 守门已替换回复内容（v1.1） |
 | `自动检查入群申请: groups={...}` | 自动审批扫描开始 |
@@ -680,7 +669,7 @@ max_duration = 1800          # 首次就禁言30分钟
 - **平台**：QQ（NapCat / MaiBot1.0-1.99）
 - **SDK**：MaiBot Plugin SDK v2
 - **适配器**：MaiBot-Napcat-Adapter
-- **提示词注入**：v1.1 采用 `HookHandler + extra_prompt`，每次 replyer 生成回复前注入；v1.0 的 `context.append` 通道已废弃
+- **提示词注入**：v1.3 采用双路 `HookHandler`（`before_request → extra_prompt` + `before_model_request → messages`），确保 Planner/Timing Gate/Replyer 全部注入
 - **守门**：`after_response` HookHandler 拦截 Bot 错误宣称无权限的回复
 - **并发安全**：`asyncio.Lock` 保护所有共享状态
 - **API 调用**：群管理核心操作使用 `_call_api`（直接 kwarg），系统消息/审批使用 `_call_action_api`（params 包装）
@@ -695,7 +684,7 @@ max_duration = 1800          # 首次就禁言30分钟
 |------|:---:|------|
 | 管理 Tool | 18 | warn / mute / unmute / kick / recall / essence_set / essence_unset / card / title / name / approve_join / reject_join / post_notice / delete_notice / get_member / get_shut_list / get_system_msg / get_notice |
 | 快捷命令 | 15 | /admin(status\|off\|on\|undo\|log\|ban\|unban\|reload) + /mute / /unmute / /kick / /warn / /essence / /recall / /shutlist |
-| HookHandler | 2 | before_request(注入) / after_response(守门) |
+| HookHandler | 3 | before_request(extra_prompt) / before_model_request(messages) / after_response(守门) |
 | EventHandler | 1 | 追踪（群号映射/计数/角色缓存） |
 | 安全护栏 | 8 步 | protected_users → exempt_users → admins → auto_exempt → mute_cooldown → 每日限额 → kick_confirm → 处罚阶梯 |
 | 配置分区 | 10 | plugin / admin / identity / auto_moderate / safeguard / warning / escalation / auto_approve / logging / prompts |
@@ -708,6 +697,17 @@ max_duration = 1800          # 首次就禁言30分钟
 ---
 
 ## 更新日志
+
+### v1.3.0 (2026-06-26)
+
+**重大重构**
+
+- 双路注入架构：`before_request → extra_prompt` + `before_model_request → messages` 同时注入，彻底解决 Planner/Timing Gate/Replyer 管理上下文缺失导致自动审核形同虚设的问题。
+- 精简默认 prompt 约 40%（380→220 中文字符），去除冗余修辞，信息密度更高。
+- 移除废弃字段 `re_inject_interval_messages` / `re_inject_interval_seconds`。
+- 提取 `_prepare_injection()` 消除重复代码。
+- 修复 EventHandler 重复代码块。
+- 版本号迭代至 1.3.0，config_version 同步更新。
 
 ### v1.1.0 (2026-06-24)
 

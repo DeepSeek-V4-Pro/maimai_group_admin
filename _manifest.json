@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "version": "1.1.0",
+  "version": "1.3.0",
   "name": "群管理助手",
-  "description": "LLM自主群管理插件 — 18个管理工具+15条快捷命令，支持禁言/踢人/设精华/公告/审批入群等，含8步安全校验护栏，按群独立配置。",
+  "description": "群管理助手 v1.3 — 18个管理工具+15条快捷命令。via before_model_request 直注管理提示词到 LLM 每次思考，自动审核/禁言/踢人/精华/公告/审批入群真正可用。",
   "author": {
     "name": "DeepSeek-V4",
     "url": "https://github.com/DeepSeek-V4-Pro"
