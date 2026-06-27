@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "1.3.0"
+config_version = "1.4.0"
 
 [admin]
 admins = []
@@ -43,23 +43,6 @@ ad_warn_window = 1800
 enabled = true
 escalation_steps = []
 
-# [[escalation.escalation_steps]]
-# within_hours = 24
-# count = 1
-# action = "mute"
-# max_duration = 600
-
-# [[escalation.escalation_steps]]
-# within_hours = 24
-# count = 2
-# action = "mute"
-# max_duration = 1800
-
-# [[escalation.escalation_steps]]
-# within_hours = 72
-# count = 3
-# action = "kick"
-
 [auto_approve]
 enabled = false
 default_action = "ignore"
@@ -69,14 +52,7 @@ max_pending_seconds = 300
 daily_approve_limit = 5
 daily_reject_limit = 10
 check_interval_seconds = 120
-
-# [[auto_approve.groups]]
-# group_id = "123456789"
-# default_action = "approve"
-# require_keywords = ""
-# reject_keywords = "广告, 推广"
-# daily_approve_limit = 5
-# daily_reject_limit = 10
+groups = []
 
 [logging]
 max_log_entries = 2000
@@ -84,5 +60,5 @@ default_log_lines = 10
 verbose_logging = false
 
 [prompts]
-auto_moderate_system = "【群管理行为参考 — 请在保持你原本人设和说话风格的前提下使用以下规则】\n\n你是本群的{bot_role}，拥有这些管理工具：{available_actions}。\n\n违规处理参考（以人设语气自然执行，不要切换成'管理员口吻'）：\n  广告/诈骗链接 → 撤回，可视情况禁言10-30分钟\n  连续刷屏 → 用你的人设语气提醒一句，继续刷再禁言5-10分钟\n  辱骂/人身攻击 → 撤回，禁言1-6小时，再犯可踢出\n  色情/违法内容 → 撤回并踢出\n  高质量分享 → 可以用设精华的方式表达赞赏\n  不确定的擦边内容 → 先观察，别着急动手\n\n操作提示：\n  警告和禁言直接调用工具，参数填 group_id 和 user_id\n  踢人前务必先调 group_get_member 确认目标身份\n  撤回和设精华需要 message_id，让用户回复目标消息后获取\n\n节奏控制：\n  正常聊天时做你自己，别主动进入'审查模式'\n  只在确实发现违规时才动用工具，不要生成'无异常'之类的报告\n  管理操作融入你的人设语气，不要说'已将xxx禁言'，用一个自然的方式带过就好"
+auto_moderate_system = "【群管理参考 — 保持人设，融入语气，不要切换管理员口吻】\n\n身份：{bot_role}  可用工具：{available_actions}\n\n处理参考（以你的人设语气自然执行）：\n  广告/诈骗 → 撤回 + 禁言10-30分钟\n  连续刷屏 → 提醒一句，继续刷再禁言5-10分钟\n  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n  色情/违法 → 撤回 + 踢出\n  高质量分享 → 设精华表达赞赏\n  不确定 → 先观察，别着急动手\n\n操作提示：警告/禁言填 group_id 和 user_id；踢人前先调 group_get_member；撤回/精华需 用户回复目标消息后获取 message_id\n\n节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过"
 command_denied_message = "你没有权限执行此操作。"

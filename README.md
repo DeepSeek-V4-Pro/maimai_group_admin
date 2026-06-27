@@ -1,6 +1,6 @@
 # 群管理助手 — LLM 自主管理 QQ 群插件
 
-**v1.3 | 18 个管理 Tool + 15 条快捷命令 + 3 个 HookHandler（双路注入 + 守门）**，让 Bot 自主监控群聊、识别违规并执行管理操作（禁言、踢人、撤回、设精华、公告、审批入群等），同时提供人类管理员的命令控制台。
+**v1.4 | 18 个管理 Tool + 15 条快捷命令 + 4 个 HookHandler（chat.receive 缓存 + 双路注入 + 守门）**，让 Bot 自主监控群聊、识别违规并执行管理操作（禁言、踢人、撤回、设精华、公告、审批入群等），同时提供人类管理员的命令控制台。
 
 ---
 
@@ -98,7 +98,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 插件总开关，设为 `true` 后插件才开始工作 |
-| `config_version` | string | `"1.3.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
+| `config_version` | string | `"1.4.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
 
 ---
 
@@ -137,7 +137,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | bool | `true` | 是否启用 LLM 自动审核（v1.3: 双路注入 extra_prompt + messages，每次 LLM 思考都注入） |
+| `enabled` | bool | `true` | 是否启用 LLM 自动审核（v1.4: chat.receive 缓存 + 双路注入，按群精确注入） |
 | `enabled_groups` | list[string] | `[]` | **必须填写**需要管理的群号列表，如 `["123456789"]`。留空不生效 |
 
 > **注意**：`enabled_groups` 为空时插件不会在任何群启动自动审核。
@@ -274,7 +274,7 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `auto_moderate_system` | string | (长文本) | **v1.3 精简**为紧凑格式，约 220 中文字符，去除冗余修辞词。可自定义 |
+| `auto_moderate_system` | string | (长文本) | **v1.3 精简**为紧凑格式，约 220 中文字符；v1.4 按群注入 {bot_role} 和 {available_actions}。可自定义 |
 | `command_denied_message` | string | `"你没有权限执行此操作。"` | 非授权用户尝试使用管理命令时的回复内容（仅 deny_response="reply" 时生效） |
 
 > `auto_moderate_system` 支持的模板变量：`{bot_role}`（群主/管理员/普通成员）、`{available_actions}`（动态可用工具列表）
@@ -283,11 +283,11 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 
 ## 功能详解
 
-### 一、LLM 自动管理层（18 个 Tool + 2 个 HookHandler）
+### 一、LLM 自动管理层（18 个 Tool + 4 个 HookHandler）
 
-Bot 通过双路 HookHandler（`before_request → extra_prompt` + `before_model_request → messages`）在每次 LLM 思考时注入管理上下文，确保 Planner/Timing Gate/Replyer 全部具备管理意识。当检测到违规行为时，LLM 自主调用管理 Tool；回复后 `after_response` HookHandler 守门检查是否有不当管理行为。
+Bot 通过 chat.receive.after_process HookHandler 缓存 msg_id → group_id，为双路注入（`before_request → extra_prompt` + `before_model_request → messages`）提供精确的群号映射。每次 LLM 思考时按群注入管理上下文，Planner/Timing Gate/Replyer 全部具备管理意识。回复后 `after_response` HookHandler 守门检查不当行为。
 
-> **v1.3 变更**：双路注入（extra_prompt + messages）彻底解决单个钩子点不全的问题。不再依赖 `before_request` 难以解析的 group_id，直接取配置中第一个已启用群的角色生成通用管理 prompt。
+> **v1.4 变更**：新增 `chat.receive.after_process` 缓存钩子解决双路注入无法获取群号的根本问题，实现按群精确注入（每个群获取真实 bot 角色），未启用群和私聊自动跳过。不再依赖配置中第一个群的硬编码角色。
 
 #### 写操作（14 个）
 
@@ -449,7 +449,7 @@ check_interval_seconds = 60
 
 ### 五、提示词系统
 
-#### 注入架构（v1.3）
+#### 注入架构（v1.4）
 
 ```
 消息到达 → EventHandler(追踪: 群号映射/计数/角色缓存)
@@ -463,7 +463,7 @@ LLM 每次思考（Planner / Replyer / Timing Gate）
             └── Bot 有管理权限却说"没权限"时自动替换回复
 ```
 
-#### 管理上下文 Prompt（v1.3 精简版）
+#### 管理上下文 Prompt（v1.4 精简版）
 
 ```
 【群管理参考 — 保持人设，融入语气，不要切换管理员口吻】
@@ -484,7 +484,7 @@ LLM 每次思考（Planner / Replyer / Timing Gate）
 节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过
 ```
 
-> **v1.3 精简**：默认 prompt 从 ~380 字压缩到 ~220 字。移除冗余短语如"请在保持你原本人设和说话风格的前提下使用以下规则""你可以""用你的"等，直接用简洁条目。
+> **v1.3/v1.4 精简**：默认 prompt 从 ~380 字压缩到 ~220 字。移除冗余短语如"请在保持你原本人设和说话风格的前提下使用以下规则""你可以""用你的"等，直接用简洁条目。
 
 ---
 
@@ -653,7 +653,8 @@ max_duration = 1800          # 首次就禁言30分钟
 | `Tool-mute / Tool-kick / Tool-warn / ...` | LLM 调用管理 Tool |
 | `Cmd-status / Cmd-mute / Cmd-off / ...` | 管理员命令执行 |
 | `角色检测结果: group=... role=...` | Bot 身份识别 |
-| `注入管理 prompt: group=... role=...` | HookHandler 直注 messages（v1.3，每次 LLM 思考都注入） |
+| `注入管理 prompt: group=... role=...` | HookHandler 直注（v1.4: 按群精确注入） |
+| `注入检测: group_id=...` | v1.4 verbose_logging 注入诊断 |
 | `守门拦截: Bot(role=...)错误宣称无权限` | after_response 守门触发（v1.1） |
 | `守门改写回复: group=...` | 守门已替换回复内容（v1.1） |
 | `自动检查入群申请: groups={...}` | 自动审批扫描开始 |
@@ -669,7 +670,7 @@ max_duration = 1800          # 首次就禁言30分钟
 - **平台**：QQ（NapCat / MaiBot1.0-1.99）
 - **SDK**：MaiBot Plugin SDK v2
 - **适配器**：MaiBot-Napcat-Adapter
-- **提示词注入**：v1.3 采用双路 `HookHandler`（`before_request → extra_prompt` + `before_model_request → messages`），确保 Planner/Timing Gate/Replyer 全部注入
+- **提示词注入**：v1.4 采用 `chat.receive.after_process` 缓存 + 双路 `HookHandler`（`before_request → extra_prompt` + `before_model_request → messages`），按群精确注入
 - **守门**：`after_response` HookHandler 拦截 Bot 错误宣称无权限的回复
 - **并发安全**：`asyncio.Lock` 保护所有共享状态
 - **API 调用**：群管理核心操作使用 `_call_api`（直接 kwarg），系统消息/审批使用 `_call_action_api`（params 包装）
@@ -678,13 +679,13 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ---
 
-## v1.1 功能总览
+## v1.4 功能总览
 
 | 模块 | 数量 | 详情 |
 |------|:---:|------|
 | 管理 Tool | 18 | warn / mute / unmute / kick / recall / essence_set / essence_unset / card / title / name / approve_join / reject_join / post_notice / delete_notice / get_member / get_shut_list / get_system_msg / get_notice |
 | 快捷命令 | 15 | /admin(status\|off\|on\|undo\|log\|ban\|unban\|reload) + /mute / /unmute / /kick / /warn / /essence / /recall / /shutlist |
-| HookHandler | 3 | before_request(extra_prompt) / before_model_request(messages) / after_response(守门) |
+| HookHandler | 4 | chat.receive(缓存) / before_request(extra_prompt) / before_model_request(messages) / after_response(守门) |
 | EventHandler | 1 | 追踪（群号映射/计数/角色缓存） |
 | 安全护栏 | 8 步 | protected_users → exempt_users → admins → auto_exempt → mute_cooldown → 每日限额 → kick_confirm → 处罚阶梯 |
 | 配置分区 | 10 | plugin / admin / identity / auto_moderate / safeguard / warning / escalation / auto_approve / logging / prompts |
@@ -697,6 +698,21 @@ max_duration = 1800          # 首次就禁言30分钟
 ---
 
 ## 更新日志
+
+### v1.4.0 (2026-06-28)
+
+**重大安全修复**
+
+- 新增 `chat.receive.after_process` HookHandler 缓存 `msg_id → group_id` 映射，解决 `before_request` / `before_model_request` 双路注入无法获取群号的根本问题。
+- 按群精确注入：每个启用群获取真实 bot 角色（owner/admin/member），未启用群和私聊自动跳过。
+- 修复 `_ensure_bot_role` 跨群 self_id fallback（`next(iter(...))`）导致权限污染。
+- 修复 `_check_admin_permission` group_id=0 时误判 sender 为 owner。
+- 修复 `_resolve_group_id_from_hook` 正则猜测和 stream 缓存反向污染。
+- 修复 `_get_member_called` 无 TTL，改为时间戳存储（300s 过期）。
+- 修复 `_check_join_requests` known_groups 跨群污染和 data 标准化紊乱。
+- 所有 18 个 Tool 添加 `group_id <= 0` 前置校验。
+- 精简 `_prepare_injection` 从 7 级检测简化为缓存查找，移除 ~110 行死代码。
+- 移除未使用的 `_last_inject_time` 字段。
 
 ### v1.3.0 (2026-06-26)
 

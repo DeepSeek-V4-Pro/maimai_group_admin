@@ -1,11 +1,12 @@
-"""群管理助手 — LLM 自主管理 QQ 群插件。v1.3
+"""群管理助手 — LLM 自主管理 QQ 群插件。v1.4
 
-18 个管理 Tool + 15 条快捷命令，支持禁言/解禁/踢人/警告/设精华/撤回/改名片/
+18 个管理 Tool + 15 条快捷命令 + 4 个 HookHandler，支持禁言/解禁/踢人/警告/设精华/撤回/改名片/
 改头衔/改群名/公告发布与删除/入群审批，含 8 步安全护栏 + 按群独立配置。
 
-v1.3: 改用 HookHandler("maisaka.replyer.before_model_request") 直注 prompt 到
-LLM 每次思考的 messages 中，确保 Planner/Timing Gate/Replyer 全部具备管理意识。
-增加 _is_group_chat 安全校验，防止提示词注入私聊。
+v1.4: 新增 chat.receive.after_process HookHandler 缓存 session_id→group_id 映射，修复双路注入
+跨群角色污染问题。before_model_request 按群精确注入，每个群获取真实 bot 角色，未启用群和私聊
+不注入。同时修复 _ensure_bot_role 跨群 self_id fallback、_check_admin_permission group_id=0 误判、
+_get_member_called TTL 缺失、_resolve_group_id_from_hook 过度猜测等 8 个安全漏洞。
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from maibot_sdk.types import ErrorPolicy, EventType, HookMode, HookOrder, ToolPa
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="1.3.0", description="配置版本")
+    config_version: str = Field(default="1.4.0", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1
@@ -158,14 +159,13 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._stream_to_group: dict[str, int] = {}
         self._disabled_groups: set[int] = set()
         self._msg_counter: dict[int, int] = {}
-        self._last_inject_time: dict[int, float] = {}
         self._daily_mute_count: dict[int, dict[str, int]] = {}
         self._daily_kick_count: dict[int, dict[str, int]] = {}
         self._daily_approve_count: dict[int, dict[str, int]] = {}
         self._daily_reject_count: dict[int, dict[str, int]] = {}
         self._warnings: dict[int, dict[str, list[tuple[float, int]]]] = {}
         self._op_log: deque[dict[str, Any]] = deque(maxlen=5000)
-        self._get_member_called: dict[int, set[int]] = {}
+        self._get_member_called: dict[int, dict[int, float]] = {}
         self._last_mute_time: dict[tuple[int, int], float] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
         self._auto_check_task: Optional[asyncio.Task] = None
@@ -225,10 +225,8 @@ class GroupAdminPlugin(MaiBotPlugin):
 
     async def _check_join_requests(self):
         aa = self.config.auto_approve
-        known_groups = set(self._group_roles.keys()) | set(self._bot_self_id.keys())
         am_enabled = self.config.auto_moderate.enabled_groups
-        if am_enabled:
-            known_groups |= {int(g) for g in am_enabled if g}
+        known_groups = {int(g) for g in am_enabled if g}
         if not known_groups:
             return
         self.ctx.logger.info(f"[群管理] 自动检查入群申请: groups={known_groups}")
@@ -244,8 +242,10 @@ class GroupAdminPlugin(MaiBotPlugin):
             if not ok or not isinstance(data, dict):
                 continue
             items = data.get("data", data)
-            if not isinstance(items, list):
-                items = [items] if items else []
+            if isinstance(items, dict):
+                items = [items]
+            elif not isinstance(items, list):
+                continue
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -383,54 +383,27 @@ class GroupAdminPlugin(MaiBotPlugin):
         return "\n\n".join(sections)
 
     def _resolve_group_id_from_hook(self, kwargs: dict) -> int:
-        """从 hook kwargs 中解析 group_id。"""
-        # 1. 顶层直接 key
+        """从 hook kwargs 中解析 group_id（强约束：显式字段+message_info+缓存）。"""
+        # 1. 优先显式字段
         for key in ("group_id", "group", "gid", "chat_id"):
-            val = kwargs.get(key)
-            if val:
-                gid = self._to_int(val)
-                if gid:
-                    return gid
-        # 2. stream_id/session_id → 缓存
-        stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "")
-        if stream_id:
-            gid = self._stream_to_group.get(stream_id, 0)
-            if gid:
+            gid = self._to_int(kwargs.get(key, 0))
+            if gid > 0:
                 return gid
-        # 3. 深层查找: message / target_message 等嵌套结构中的 group_id
-        for nested_key in ("message", "target_message", "reply_tool_args"):
-            obj = kwargs.get(nested_key)
-            if isinstance(obj, dict):
-                for gk in ("group_id", "group", "chat_id"):
-                    val = obj.get(gk)
-                    if val:
-                        gid = self._to_int(val)
-                        if gid:
-                            self._stream_to_group[stream_id] = gid
-                            return gid
-                mi = obj.get("message_info", {}) or {}
-                if isinstance(mi, dict):
-                    gi = mi.get("group_info", {}) or {}
-                    val = gi.get("group_id", 0)
-                    if val:
-                        gid = self._to_int(val)
-                        if gid:
-                            self._stream_to_group[stream_id] = gid
-                            return gid
-        # 4. messages 全文搜索
-        messages = kwargs.get("messages")
-        if isinstance(messages, list):
-            text = "\n".join(
-                str(m.get("content") or m.get("content_text") or "")
-                for m in messages
-                if isinstance(m, dict)
-            )
-            for m in re.finditer(r"(?:qq_group_|group_id[=：:]\s*|群号[：:=\s]*)(\d{5,15})", text):
-                return self._to_int(m.group(1))
-            for m in re.finditer(r"\b(\d{5,15})\b", text):
-                candidate = self._to_int(m.group(1))
-                if candidate and self._is_group_enabled(candidate):
-                    return candidate
+        # 2. message_info
+        msg = kwargs.get("message", {})
+        if isinstance(msg, dict):
+            mi = msg.get("message_info", {}) or {}
+            gi = mi.get("group_info", {}) or {}
+            gid = self._to_int(gi.get("group_id", 0))
+            if gid > 0:
+                return gid
+        # 3. 缓存查找（chat.receive.after_process 写入）
+        for key in ("reply_message_id", "session_id", "stream_id", "chat_id"):
+            sid = str(kwargs.get(key, ""))
+            if sid:
+                gid = self._stream_to_group.get(sid, 0)
+                if gid > 0:
+                    return gid
         return 0
 
     def _get_group_role(self, group_id: int) -> Optional[str]:
@@ -505,8 +478,6 @@ class GroupAdminPlugin(MaiBotPlugin):
                     self_id = self._to_int(self.config.identity.bot_qq)
                 if not self_id:
                     self_id = self._bot_self_id.get(group_id)
-                if not self_id:
-                    self_id = next(iter(self._bot_self_id.values()), None)
                 if not self_id:
                     return None
                 ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=group_id, user_id=self_id, no_cache=True)
@@ -658,15 +629,14 @@ class GroupAdminPlugin(MaiBotPlugin):
         admins = self.config.admin.admins
         deny_mode = self.config.admin.deny_response
         if str(sender_id) in admins: return True
+        if group_id <= 0:
+            if deny_mode == "reply":
+                await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+            return False
         is_owner = False
-        if group_id:
-            role = await self._check_target_role(group_id, sender_id)
-            if role == "owner":
-                is_owner = True
-        elif not admins:
-            role = await self._check_target_role(group_id, sender_id) if group_id else None
-            if role == "owner":
-                is_owner = True
+        role = await self._check_target_role(group_id, sender_id)
+        if role == "owner":
+            is_owner = True
         if is_owner:
             if not self.config.admin.allow_group_owner:
                 pass
@@ -697,6 +667,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_warn_user(self, group_id: int = 0, user_id: int = 0, violation_type: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_warn_user", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-warn: group={group_id} user={user_id} type={violation_type}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -723,6 +695,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_mute_user(self, group_id: int = 0, user_id: int = 0, duration: int = 0, reason: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_mute_user", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-mute: group={group_id} user={user_id} dur={duration}s")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -765,6 +739,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_unmute_user(self, group_id: int = 0, user_id: int = 0, **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_unmute_user", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-unmute: group={group_id} user={user_id}")
         async with self._lock:
             try:
@@ -785,6 +761,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_kick_user(self, group_id: int = 0, user_id: int = 0, reason: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_kick_user", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-kick: group={group_id} user={user_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -799,7 +777,10 @@ class GroupAdminPlugin(MaiBotPlugin):
             if esc and esc.action == "mute":
                 return {"name": "group_kick_user", "content": f"处罚阶梯建议先禁言 {esc.max_duration} 秒而非直接踢出，请使用 group_mute_user"}
             sf = self.config.safeguard
-            if sf.kick_require_confirm and user_id not in self._get_member_called.get(group_id, set()): return {"name": "group_kick_user", "content": "踢人前请先调用 group_get_member 确认目标身份"}
+            if sf.kick_require_confirm:
+                called_time = self._get_member_called.get(group_id, {}).get(user_id, 0)
+                if time.time() - called_time > 300:
+                    return {"name": "group_kick_user", "content": "踢人前请先调用 group_get_member 确认目标身份"}
             today = self._today_key()
             self._daily_kick_count.setdefault(group_id, {}).setdefault(today, 0)
             if self._daily_kick_count[group_id][today] >= sf.daily_kick_limit: return {"name": "group_kick_user", "content": f"今天已经踢出了 {sf.daily_kick_limit} 个用户，已达每日上限"}
@@ -808,7 +789,7 @@ class GroupAdminPlugin(MaiBotPlugin):
                 if not ok: self._add_log(group_id, "kick", user_id, reason, False); return {"name": "group_kick_user", "content": f"踢出未能生效: {data}"}
                 self._daily_kick_count[group_id][today] += 1
                 self._add_log(group_id, "kick", user_id, reason, True)
-                self._get_member_called[group_id].discard(user_id)
+                self._get_member_called[group_id].pop(user_id, None)
                 return {"name": "group_kick_user", "content": f"已将 @{user_id} 踢出群聊，原因：{reason}"}
             except Exception as e:
                 self._add_log(group_id, "kick", user_id, reason, False)
@@ -825,6 +806,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_set_user_card(self, group_id: int = 0, user_id: int = 0, card: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_set_user_card", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-card: group={group_id} user={user_id}")
         async with self._lock:
             is_protected, msg = await self._is_protected(group_id, user_id)
@@ -847,6 +830,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_set_title(self, group_id: int = 0, user_id: int = 0, title: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_set_title", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-title: group={group_id} user={user_id}")
         async with self._lock:
             is_protected, msg = await self._is_protected(group_id, user_id)
@@ -868,6 +853,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_set_name(self, group_id: int = 0, name: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_set_name", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-setname: group={group_id} name={name}")
         async with self._lock:
             try:
@@ -888,6 +875,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_approve_join(self, group_id: int = 0, request_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_approve_join", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-approve: group={group_id} req={request_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -914,6 +903,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_reject_join(self, group_id: int = 0, request_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_reject_join", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-reject: group={group_id} req={request_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -939,6 +930,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_post_notice(self, group_id: int = 0, content: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_post_notice", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-notice-post: group={group_id}")
         async with self._lock:
             try:
@@ -962,6 +955,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_delete_notice(self, group_id: int = 0, notice_id: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_delete_notice", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-notice-del: group={group_id}")
         async with self._lock:
             try:
@@ -977,6 +972,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_set_essence(self, group_id: int = 0, message_id: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_set_essence", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-essence-set: group={group_id}")
         async with self._lock:
             try:
@@ -992,6 +989,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_unset_essence(self, group_id: int = 0, message_id: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_unset_essence", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-essence-del: group={group_id}")
         async with self._lock:
             try:
@@ -1008,6 +1007,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_recall_msg(self, group_id: int = 0, message_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_recall_msg", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-recall: group={group_id} mid={message_id}")
         async with self._lock:
             try:
@@ -1023,9 +1024,11 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_get_member(self, group_id: int = 0, user_id: int = 0, **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_get_member", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-get-member: group={group_id} user={user_id}")
         async with self._lock:
-            self._get_member_called.setdefault(group_id, set()).add(user_id)
+            self._get_member_called.setdefault(group_id, {})[user_id] = time.time()
             try:
                 ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=self._to_int(group_id), user_id=self._to_int(user_id), no_cache=True)
                 if ok and isinstance(data, dict):
@@ -1041,6 +1044,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_get_shut_list(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_get_shut_list", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-get-shutlist: group={group_id}")
         async with self._lock:
             try:
@@ -1055,6 +1060,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_get_notice(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_get_notice", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-get-notice: group={group_id}")
         async with self._lock:
             try:
@@ -1070,6 +1077,8 @@ class GroupAdminPlugin(MaiBotPlugin):
     ])
     async def tool_get_system_msg(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
         del kwargs
+        if group_id <= 0:
+            return {"name": "group_get_system_msg", "content": "无效的 group_id"}
         self.ctx.logger.info(f"[群管理] Tool-get-sysmsg: group={group_id}")
         async with self._lock:
             try:
@@ -1077,8 +1086,10 @@ class GroupAdminPlugin(MaiBotPlugin):
                 now = datetime.now()
                 if ok and isinstance(data, dict):
                     items = data.get("data", data)
-                    if not isinstance(items, list):
-                        items = [items] if items else []
+                    if isinstance(items, dict):
+                        items = [items]
+                    elif not isinstance(items, list):
+                        items = []
                     max_age = self.config.auto_approve.max_pending_seconds
                     all_join = []
                     all_invites = []
@@ -1437,7 +1448,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         return True, "", True
 
     # =========================================================================
-    # EventHandler: auto_moderate_tracker — 映射群号/计数消息/检测@提及 (v1.3: 注入已迁移到 HookHandler)
+    # EventHandler: auto_moderate_tracker — 映射群号/计数消息/检测@提及 (v1.4: 注入已迁移到 HookHandler)
     # =========================================================================
 
     @EventHandler("auto_moderate_tracker", description="自动审核追踪: 映射群号、计数消息、检测@提及", event_type=EventType.ON_MESSAGE)
@@ -1452,7 +1463,10 @@ class GroupAdminPlugin(MaiBotPlugin):
             group_id = self._to_int(gi.get("group_id", 0))
             self_id = ac.get("self_id")
             if self_id and group_id: self._bot_self_id[group_id] = self._to_int(self_id)
-            if group_id and stream_id: self._stream_to_group[stream_id] = group_id
+            if group_id:
+                if stream_id: self._stream_to_group[stream_id] = group_id
+                sid = str(kwargs.get("session_id", ""))
+                if sid: self._stream_to_group[sid] = group_id
         if not group_id or not self._is_group_enabled(group_id): return {"continue_processing": True}
         await self._ensure_bot_role(group_id)
         self._msg_counter[group_id] = self._msg_counter.get(group_id, 0) + 1
@@ -1463,58 +1477,103 @@ class GroupAdminPlugin(MaiBotPlugin):
         return {"continue_processing": True}
 
     # =========================================================================
+    # HookHandler: chat.receive.after_process — 缓存 session_id → group_id
+    # =========================================================================
+
+    @HookHandler(
+        "chat.receive.after_process",
+        name="group_admin_session_bind",
+        description="在消息处理完成后缓存 session_id → group_id 映射，供后续 before_model_request 注入使用",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.EARLY,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def cache_session_group(self, message: Any = None, **kwargs: Any):
+        if not isinstance(message, dict):
+            return {"action": "continue"}
+        mi = message.get("message_info", {}) or {}
+        gi = mi.get("group_info", {}) or {}
+        group_id = self._to_int(gi.get("group_id", 0))
+        if group_id <= 0:
+            return {"action": "continue"}
+        msg_id = str(message.get("message_id", ""))
+        for key in ("session_id", "stream_id", "chat_id"):
+            sid = str(kwargs.get(key, ""))
+            if sid:
+                self._stream_to_group[sid] = group_id
+        if msg_id:
+            self._stream_to_group[msg_id] = group_id
+        return {"action": "continue"}
+
+    # =========================================================================
     # 注入辅助
     # =========================================================================
 
-    async def _prepare_injection(self) -> tuple[list[int], str, str] | None:
-        """返回 (enabled_groups, role, prompt) 或 None（不应注入时）。"""
+    async def _prepare_injection(self, **kwargs: Any) -> tuple[int, str, str] | None:
+        """返回 (group_id, role, prompt) 或 None（不应注入时）。
+
+        仅在当前请求来自 enabled_groups 中的群时才注入，
+        且使用该群的实际 bot 角色。
+        """
         if not self.config.plugin.enabled or not self.config.auto_moderate.enabled:
             return None
-        enabled = [int(g) for g in self.config.auto_moderate.enabled_groups if g]
+        enabled = {int(g) for g in self.config.auto_moderate.enabled_groups if g}
         if not enabled:
             return None
-        sample_gid = enabled[0]
-        role = await self._ensure_bot_role(sample_gid) or "member"
-        prompt = self._build_admin_prompt(sample_gid, role)
-        return enabled, role, prompt
+        group_id = 0
+        # 从缓存查找（chat.receive.after_process 写入: session_id/stream_id/msg_id → group_id）
+        for key in ("reply_message_id", "session_id", "stream_id", "chat_id"):
+            sid = str(kwargs.get(key, ""))
+            if sid:
+                gid = self._stream_to_group.get(sid, 0)
+                if gid in enabled:
+                    group_id = gid
+                    break
+        if self.config.logging.verbose_logging:
+            self.ctx.logger.info("[群管理] 注入检测: group_id=%s", group_id)
+        if group_id <= 0:
+            return None
+        role = await self._ensure_bot_role(group_id) or "member"
+        prompt = self._build_admin_prompt(group_id, role)
+        return group_id, role, prompt
 
     # =========================================================================
-    # HookHandler: before_request — 缓存 group_id + 注入 extra_prompt（v1.3）
+    # HookHandler: before_request — 注入 extra_prompt（v1.4）
     # =========================================================================
 
     @HookHandler(
         "maisaka.replyer.before_request",
         name="group_admin_replyer_prompt",
-        description="[v1.3] 向所有已启用群的 Replyer extra_prompt 注入管理提示词，让 LLM 回复时具备管理意识。",
+        description="[v1.4] 向当前启用群的 Replyer extra_prompt 注入管理提示词，让 LLM 回复时具备管理意识。",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         error_policy=ErrorPolicy.SKIP,
     )
     async def inject_admin_prompt(self, **kwargs: Any):
-        prep = await self._prepare_injection()
+        prep = await self._prepare_injection(**kwargs)
         if not prep: return {"action": "continue"}
-        enabled, role, prompt = prep
+        group_id, role, prompt = prep
         extra = str(kwargs.get("extra_prompt") or "")
         extra = f"{extra}\n\n{prompt}" if extra else prompt
-        self.ctx.logger.debug("[群管理] before_request 注入 extra_prompt: role=%s", role)
+        self.ctx.logger.debug("[群管理] before_request 注入 extra_prompt: group=%s role=%s", group_id, role)
         return {"action": "continue", "modified_kwargs": {"extra_prompt": extra}}
 
     # =========================================================================
-    # HookHandler: before_model_request — 注入 messages（v1.3）
+    # HookHandler: before_model_request — 注入 messages（v1.4）
     # =========================================================================
 
     @HookHandler(
         "maisaka.replyer.before_model_request",
         name="group_admin_model_prompt",
-        description="[v1.3] 向 Planner/Timing Gate/Replyer 的 messages 直注管理提示词，让所有子代理都具备管理意识。",
+        description="[v1.4] 向 Planner/Timing Gate/Replyer 的 messages 直注管理提示词，按群精确注入。",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         error_policy=ErrorPolicy.SKIP,
     )
     async def inject_admin_model_prompt(self, **kwargs: Any):
-        prep = await self._prepare_injection()
+        prep = await self._prepare_injection(**kwargs)
         if not prep: return {"action": "continue"}
-        _, role, prompt = prep
+        group_id, role, prompt = prep
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
             return {"action": "continue"}
@@ -1536,7 +1595,7 @@ class GroupAdminPlugin(MaiBotPlugin):
             updated.append(message)
         if not inserted:
             updated.insert(0, {"role": "system", "content": prompt, "content_text": prompt})
-        self.ctx.logger.debug("[群管理] before_model_request 注入 messages: role=%s", role)
+        self.ctx.logger.debug("[群管理] before_model_request 注入 messages: group=%s role=%s", group_id, role)
         return {"action": "continue", "modified_kwargs": {"messages": updated}}
 
     # =========================================================================
