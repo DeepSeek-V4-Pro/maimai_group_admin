@@ -57,12 +57,14 @@ class AutoModerateSectionConfig(PluginConfigBase):
     audit_confidence_threshold: float = Field(default=0.72, description="入站审核执行warn/mute的最低置信度")
     audit_images: bool = Field(default=True, description="是否审核图片/表情消息")
     image_audit_max_images: int = Field(default=4, description="单条消息最多审核的图片/表情数量")
+    forwarded_image_audit_max_images: int = Field(default=8, description="合并转发展开后最多审核的图片/表情数量")
     image_description_timeout: float = Field(default=12.0, description="单张图片等待描述生成的最长秒数")
     image_unknown_policy: str = Field(
         default="none",
         description="图片描述为空/超时的处理策略: none=仅记录并审核其余图片, warn=警告, notify_admin=通知最后发言的群主或管理员，找不到则通知群主",
     )
     image_unknown_notice_use_llm: bool = Field(default=False, description="通知群主或管理员处理未知图片风险时是否使用LLM生成提示文本")
+    image_unknown_notice_model: str = Field(default="replyer", description="图片未知风险通知使用的模型任务名")
     expand_forwarded_records: bool = Field(default=True, description="是否尝试展开QQ合并转发内容进行审核")
     treat_forwarded_records_as_single_message: bool = Field(
         default=True,
@@ -149,6 +151,15 @@ class PromptsSectionConfig(PluginConfigBase):
         "\n"
         "节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过"
     ), description="自动审核系统提示词")
+    image_unknown_notice_prompt: str = Field(default=(
+        "{bot_style_context}\n\n"
+        "需要用现人设和口吻写一句很短的中文提示，"
+        "呼叫群主或管理员人工查看。"
+        "场景：有{unreadable_kind_detail}描述为空或超时，自动审核无法确认{unreadable_kind}内容。"
+        "要求：自然、简短、像群里正常说话；不要说已经违规；不要要求撤回；"
+        "不要包含@；不要解释技术细节；不要输出括号说明。"
+        "只输出一句话。"
+    ), description="图片/表情包描述为空/超时时，LLM生成呼叫群主或管理员提示的提示词。可用变量: {bot_style_context}, {bot_nickname}, {unreadable_count}, {unreadable_kind}, {unreadable_kind_detail}")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 
 class GroupAdminConfig(PluginConfigBase):
@@ -188,6 +199,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._recent_group_managers: dict[int, deque[tuple[float, int, str]]] = {}
         self._audit_tasks: dict[tuple[Any, ...], asyncio.Task] = {}
         self._audit_seen_messages: dict[str, float] = {}
+        self._seen_emoji_hashes: dict[str, float] = {}
         self._op_log: deque[dict[str, Any]] = deque(maxlen=5000)
         self._get_member_called: dict[int, dict[int, float]] = {}
         self._last_mute_time: dict[tuple[int, int], float] = {}
@@ -195,6 +207,9 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._auto_check_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         self._last_cleanup_time: float = 0
+        self._host_persona_context: str = ""
+        self._host_reply_style: str = ""
+        self._host_persona_cached_at: float = 0.0
 
     # ===== 生命周期 =====
 
@@ -474,6 +489,14 @@ class GroupAdminPlugin(MaiBotPlugin):
         for msg_id, ts in list(self._audit_seen_messages.items()):
             if now - ts > 900:
                 del self._audit_seen_messages[msg_id]
+        emoji_hash_ttl = 86400
+        for image_hash, ts in list(self._seen_emoji_hashes.items()):
+            if now - ts > emoji_hash_ttl:
+                del self._seen_emoji_hashes[image_hash]
+        if len(self._seen_emoji_hashes) > 5000:
+            keys = sorted(self._seen_emoji_hashes.keys(), key=lambda k: self._seen_emoji_hashes[k])
+            for image_hash in keys[:len(keys) - 3000]:
+                del self._seen_emoji_hashes[image_hash]
         self._last_cleanup_time = now
 
     # ===== Prompt 构建 =====
@@ -625,12 +648,19 @@ class GroupAdminPlugin(MaiBotPlugin):
                 filename = image_url
                 suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
                 image_format = suffix if suffix in ("jpg", "jpeg", "png", "gif", "webp") else ""
+            image_type = "emoji" if seg_type == "emoji" else "image"
             if image_hash or image_base64 or image_url.startswith(("http://", "https://")):
                 key = (image_hash, image_base64[:64], image_url, image_format)
                 if key in seen:
                     continue
                 seen.add(key)
-                images.append({"hash": image_hash, "base64": image_base64, "url": image_url, "format": image_format})
+                images.append({
+                    "type": image_type,
+                    "hash": image_hash,
+                    "base64": image_base64,
+                    "url": image_url,
+                    "format": image_format,
+                })
         return images
 
     def _is_forwarded_chat_record(self, message: Any, text: str = "") -> bool:
@@ -712,17 +742,26 @@ class GroupAdminPlugin(MaiBotPlugin):
 
     def _merge_image_segments(self, first: list[dict[str, str]], second: list[dict[str, str]]) -> list[dict[str, str]]:
         merged: list[dict[str, str]] = []
-        seen: set[tuple[str, str, str, str]] = set()
+        seen: set[tuple[str, str, str, str, str]] = set()
         for image in [*first, *second]:
             if not isinstance(image, dict):
                 continue
             normalized = {
+                "type": str(image.get("type") or "image").strip().lower() or "image",
                 "hash": str(image.get("hash") or "").strip(),
                 "base64": str(image.get("base64") or "").strip(),
                 "url": str(image.get("url") or "").strip(),
                 "format": str(image.get("format") or "").strip(),
             }
-            key = (normalized["hash"], normalized["base64"][:64], normalized["url"], normalized["format"])
+            if normalized["type"] not in ("image", "emoji"):
+                normalized["type"] = "image"
+            key = (
+                normalized["type"],
+                normalized["hash"],
+                normalized["base64"][:64],
+                normalized["url"],
+                normalized["format"],
+            )
             if key in seen or not (normalized["hash"] or normalized["base64"] or normalized["url"]):
                 continue
             seen.add(key)
@@ -979,7 +1018,7 @@ class GroupAdminPlugin(MaiBotPlugin):
             "只输出一句中文短回复。"
         )
         try:
-            result = await self.ctx.llm.generate(prompt=prompt, model="replyer", temperature=0.6, max_tokens=60)
+            result = await self.ctx.llm.generate(prompt=prompt, model="replyer", temperature=0.6)
             if isinstance(result, dict) and result.get("success"):
                 text = str(result.get("response", "")).strip()
                 text = re.sub(r"^```.*?```$", "", text, flags=re.S).strip()
@@ -989,6 +1028,163 @@ class GroupAdminPlugin(MaiBotPlugin):
         except Exception as e:
             self.ctx.logger.warning(f"[群管理] 生成人设提醒失败: {e}")
         return "先停一下，这个不太适合继续刷屏喵。"
+
+    @staticmethod
+    def _build_notice_task_context() -> str:
+        return "\n".join(
+            [
+                "【群管理呼叫任务边界】",
+                "你正在生成由 MaiBot 当前角色本人对外发送的群管理呼叫文本。",
+                "任务只规定要呼叫群主或管理员人工查看图片，不定义新的角色或说话风格。",
+                "不要自称群管理助手、系统、插件或审核员。",
+                "不要说图片已经违规，不要要求撤回，不要解释技术细节。",
+                "不要输出 @；插件会在发送时自动 @ 目标群主或管理员。",
+            ]
+        )
+
+    async def _build_host_persona_context(self, user_request: str = "") -> str:
+        base_context = self._build_notice_task_context()
+        now = time.monotonic()
+        cached_reply_style = str(getattr(self, "_host_reply_style", "") or "").strip()
+        if cached_reply_style and self._host_persona_cached_at and now - self._host_persona_cached_at < 60.0:
+            return "\n\n".join(part for part in (self._host_persona_context, base_context) if part)
+
+        if not hasattr(self.ctx, "config") or not hasattr(self.ctx.config, "get"):
+            self._host_persona_context = ""
+            self._host_reply_style = ""
+            self._host_persona_cached_at = 0.0
+            return base_context
+
+        config_keys = (
+            "bot.nickname",
+            "bot.alias_names",
+            "personality.personality",
+            "personality.reply_style",
+        )
+        defaults: tuple[Any, ...] = ("", [], "", "")
+        try:
+            results = await asyncio.gather(
+                *(self.ctx.config.get(key, default) for key, default in zip(config_keys, defaults, strict=True)),
+                return_exceptions=True,
+            )
+        except Exception as e:
+            self.ctx.logger.debug(f"[群管理] 读取MaiBot人格配置失败: {e}")
+            self._host_persona_context = ""
+            self._host_reply_style = ""
+            self._host_persona_cached_at = 0.0
+            return base_context
+
+        values: list[Any] = []
+        failed_keys: list[str] = []
+        for key, result, default in zip(config_keys, results, defaults, strict=True):
+            if isinstance(result, BaseException):
+                failed_keys.append(key)
+                values.append(default)
+            else:
+                values.append(result)
+        if failed_keys:
+            self.ctx.logger.debug(f"[群管理] 部分MaiBot人格配置读取失败: {', '.join(failed_keys)}")
+        if len(failed_keys) == len(config_keys):
+            self._host_persona_context = ""
+            self._host_reply_style = ""
+            self._host_persona_cached_at = 0.0
+            return base_context
+
+        nickname, aliases, personality, reply_style = values
+        persona_lines = [
+            "【必须遵守的 MaiBot 身份与表达方式】",
+            "下面的人格和表达风格决定最终文本的措辞、句式、语气与态度，优先于群管理呼叫任务中的一般性措辞。",
+        ]
+        nickname_text = str(nickname or "").strip()
+        if nickname_text:
+            persona_lines.append(f"你的名字：{nickname_text}")
+
+        if isinstance(aliases, (list, tuple, set)):
+            alias_text = "、".join(str(alias).strip() for alias in aliases if str(alias).strip())
+        else:
+            alias_text = str(aliases or "").strip()
+        if alias_text:
+            persona_lines.append(f"你的别名：{alias_text[:300]}")
+
+        personality_text = str(personality or "").strip()
+        if personality_text:
+            persona_lines.append(f"人格设定：{personality_text[:2000]}")
+
+        reply_style_text = str(reply_style or "").strip()
+        self._host_reply_style = reply_style_text[:1600]
+        if self._host_reply_style:
+            persona_lines.append(f"表达风格：{self._host_reply_style}")
+            self._host_persona_cached_at = now
+            self.ctx.logger.debug(
+                "[群管理] 已读取MaiBot表达风格: chars=%s preview=%s",
+                len(self._host_reply_style),
+                self._host_reply_style[:80].replace("\n", " "),
+            )
+        else:
+            self._host_persona_cached_at = 0.0
+            self.ctx.logger.debug("[群管理] 未读取到 personality.reply_style，跳过专门风格重写")
+
+        if len(persona_lines) == 2:
+            self._host_persona_context = ""
+            return base_context
+
+        persona_lines.extend(
+            [
+                "请直接以这个角色本人说话，不要切换成通用 AI、客服、管理员或系统腔调。",
+                "下方群管理呼叫任务只能限制要说什么和输出长度，不得覆盖这里的人格与表达风格。",
+            ]
+        )
+        self._host_persona_context = "\n".join(persona_lines)
+        return f"{self._host_persona_context}\n\n{base_context}"
+
+    @staticmethod
+    def _normalize_notice_text(text: str) -> str:
+        text = str(text or "").replace("\n", " ").strip(" \"'“”「」")
+        text = re.sub(r"@\S+", "", text).strip()
+        return text[:120]
+
+    async def _request_notice_llm_text(self, prompt: str, system_prompt: str = "", temperature: float = 0.5) -> str:
+        try:
+            notice_model = str(getattr(self.config.auto_moderate, "image_unknown_notice_model", "replyer") or "replyer").strip()
+            llm_prompt: str | list[dict[str, str]]
+            if system_prompt.strip():
+                llm_prompt = [
+                    {"role": "system", "content": system_prompt.strip()},
+                    {"role": "user", "content": prompt},
+                ]
+            else:
+                llm_prompt = prompt
+            result = await self.ctx.llm.generate(
+                prompt=llm_prompt,
+                model=notice_model,
+                temperature=temperature,
+            )
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 调用LLM生成图片未知风险通知失败: {e}")
+            return ""
+        if isinstance(result, dict):
+            if not result.get("success"):
+                self.ctx.logger.warning(f"[群管理] LLM生成图片未知风险通知失败: {result.get('error', 'unknown')}")
+                return ""
+            return self._normalize_notice_text(result.get("response", ""))
+        return self._normalize_notice_text(str(result or ""))
+
+    async def _rewrite_notice_in_host_style(self, draft: str, system_prompt: str, reply_style: str) -> str:
+        rewrite_prompt = "\n".join(
+            [
+                "【最终发言风格渲染】",
+                "请把下面的草稿改写成 MaiBot 当前角色本人会直接发送到群里的发言。",
+                f"必须完整遵守的表达风格：{reply_style}",
+                "逐项落实其中关于语气、用词、句式、立场、口癖、结尾、标点、禁止事项和强制格式的全部要求。",
+                "只改变表达方式，不改变“需要群主或管理员人工查看图片”的含义。",
+                "不要输出 @；不要添加解释、标签、引号或分析过程。",
+                "最终文本不得超过 80 个中文字符，只输出最终可发送文本。",
+                "",
+                "【待改写草稿】",
+                draft,
+            ]
+        )
+        return await self._request_notice_llm_text(rewrite_prompt, system_prompt=system_prompt, temperature=0.2)
 
     async def _resolve_group_stream_id(self, group_id: int, stream_id: str = "") -> str:
         stream_id = str(stream_id or "").strip()
@@ -1055,7 +1251,13 @@ class GroupAdminPlugin(MaiBotPlugin):
         if self.config.logging.verbose_logging:
             self.ctx.logger.info(f"[群管理] 自动撤回结果: group={group_id} mid={message_id} result={result}")
 
-    async def _get_image_description_for_audit(self, image_info: dict[str, str], timeout: float = 12.0) -> str:
+    async def _get_image_description_for_audit(
+        self,
+        image_info: dict[str, str],
+        timeout: float = 12.0,
+        image_index: int = 0,
+    ) -> str:
+        image_type = str(image_info.get("type") or "image").strip().lower() or "image"
         image_hash = str(image_info.get("hash") or "").strip()
         image_base64 = str(image_info.get("base64") or "").strip()
         image_url = str(image_info.get("url") or "").strip()
@@ -1097,7 +1299,8 @@ class GroupAdminPlugin(MaiBotPlugin):
             await asyncio.sleep(0.5)
         if self.config.logging.verbose_logging:
             self.ctx.logger.info(
-                f"[群管理] 图片描述为空或超时: hash={image_hash[:12]} has_base64={bool(image_base64)} err={last_error}"
+                f"[群管理] 图片描述为空或超时: type={image_type} index={image_index or '-'} hash={image_hash[:12]} "
+                f"has_base64={bool(image_base64)} has_url={bool(image_url)} err={last_error}"
             )
         return ""
 
@@ -1108,6 +1311,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         images: list[dict[str, str]],
         stream_id: str = "",
         message_id: str = "",
+        forwarded_record_single_message: bool = False,
     ) -> None:
         try:
             is_protected, protected_reason = await self._is_protected(group_id, user_id)
@@ -1117,9 +1321,12 @@ class GroupAdminPlugin(MaiBotPlugin):
                         f"[群管理] 图片审核跳过受保护用户: group={group_id} user={user_id} reason={protected_reason}"
                     )
                 return
-            image_limit = self._to_int(getattr(self.config.auto_moderate, "image_audit_max_images", 4))
+            if forwarded_record_single_message:
+                image_limit = self._to_int(getattr(self.config.auto_moderate, "forwarded_image_audit_max_images", 8))
+            else:
+                image_limit = self._to_int(getattr(self.config.auto_moderate, "image_audit_max_images", 4))
             if image_limit <= 0:
-                image_limit = 4
+                image_limit = 8 if forwarded_record_single_message else 4
             try:
                 description_timeout = float(getattr(self.config.auto_moderate, "image_description_timeout", 12.0))
             except Exception:
@@ -1128,20 +1335,82 @@ class GroupAdminPlugin(MaiBotPlugin):
             unknown_policy = str(getattr(self.config.auto_moderate, "image_unknown_policy", "none") or "none").strip().lower()
             descriptions: list[str] = []
             unreadable_images: list[str] = []
-            for index, image_info in enumerate(images[:image_limit], start=1):
+            unreadable_summaries: list[str] = []
+            unreadable_type_counts = {"图片": 0, "表情包": 0}
+            audited_count = 0
+            for index, image_info in enumerate(images, start=1):
+                image_type = str(image_info.get("type") or "image").strip().lower() or "image"
+                image_type_label = "表情包" if image_type == "emoji" else "图片"
                 image_hash = str(image_info.get("hash") or "").strip()
-                desc = await self._get_image_description_for_audit(image_info, timeout=description_timeout)
+                image_base64 = str(image_info.get("base64") or "").strip()
+                image_url = str(image_info.get("url") or "").strip()
+                image_format = str(image_info.get("format") or "").strip()
+                if image_type == "emoji" and image_hash:
+                    first_seen = self._seen_emoji_hashes.get(image_hash)
+                    if first_seen:
+                        if self.config.logging.verbose_logging:
+                            age = int(time.time() - first_seen)
+                            self.ctx.logger.info(
+                                f"[群管理] 重复表情包跳过审核: group={group_id} mid={message_id} "
+                                f"index={index}/{len(images)} hash={image_hash[:12]} age={age}s"
+                            )
+                        continue
+                if audited_count >= image_limit:
+                    if self.config.logging.verbose_logging:
+                        self.ctx.logger.info(
+                            f"[群管理] 图片审核达到数量上限: group={group_id} mid={message_id} "
+                            f"forwarded_record={forwarded_record_single_message} limit={image_limit} "
+                            f"total={len(images)} next_index={index}"
+                        )
+                    break
+                audited_count += 1
+                if image_type == "emoji" and image_hash:
+                    self._seen_emoji_hashes[image_hash] = time.time()
+                if self.config.logging.verbose_logging:
+                    self.ctx.logger.info(
+                        f"[群管理] 图片审核取描述: group={group_id} mid={message_id} "
+                        f"forwarded_record={forwarded_record_single_message} type={image_type} "
+                        f"index={index}/{len(images)} audit_no={audited_count}/{image_limit} "
+                        f"hash={image_hash[:12] or 'unknown'} "
+                        f"format={image_format or '-'} has_base64={bool(image_base64)} has_url={bool(image_url)}"
+                    )
+                desc = await self._get_image_description_for_audit(
+                    image_info,
+                    timeout=description_timeout,
+                    image_index=index,
+                )
                 if desc:
-                    descriptions.append(f"{index}. hash={image_hash[:12] or 'unknown'} 描述：{desc}")
+                    if self.config.logging.verbose_logging:
+                        desc_preview = desc.replace("\r", " ").replace("\n", " ").strip()
+                        if len(desc_preview) > 80:
+                            desc_preview = desc_preview[:80] + "..."
+                        self.ctx.logger.info(
+                            f"[群管理] 图片审核描述成功: group={group_id} mid={message_id} "
+                            f"forwarded_record={forwarded_record_single_message} type={image_type} "
+                            f"index={index}/{len(images)} audit_no={audited_count}/{image_limit} "
+                            f"hash={image_hash[:12] or 'unknown'} "
+                            f"desc={desc_preview}"
+                        )
+                    descriptions.append(f"{index}. type={image_type_label} hash={image_hash[:12] or 'unknown'} 描述：{desc}")
                 else:
-                    unreadable_images.append(f"{index}. hash={image_hash[:12] or 'unknown'} 描述状态：为空或超时，无法确认图片内容")
+                    unreadable_images.append(
+                        f"{index}. type={image_type_label} hash={image_hash[:12] or 'unknown'} "
+                        f"描述状态：为空或超时，无法确认{image_type_label}内容"
+                    )
+                    unreadable_summaries.append(f"{index}:{image_type_label}:{image_hash[:12] or 'unknown'}")
+                    unreadable_type_counts[image_type_label] = unreadable_type_counts.get(image_type_label, 0) + 1
             if unreadable_images and unknown_policy == "notify_admin":
+                unreadable_kind = self._format_unreadable_kind(unreadable_type_counts)
+                unreadable_kind_detail = self._format_unreadable_kind_detail(unreadable_type_counts)
                 await self._notify_group_manager_for_image_unknown(
                     group_id,
                     user_id,
                     stream_id,
                     message_id,
                     len(unreadable_images),
+                    ",".join(unreadable_summaries),
+                    unreadable_kind,
+                    unreadable_kind_detail,
                 )
                 if descriptions:
                     audit_text = "[图片消息] 图片描述：\n" + "\n".join(descriptions)
@@ -1214,6 +1483,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         images: list[dict[str, str]],
         message_id: str = "",
         stream_id: str = "",
+        forwarded_record_single_message: bool = False,
     ) -> None:
         if not self.config.auto_moderate.audit_images or not images or group_id <= 0 or user_id <= 0:
             return
@@ -1228,10 +1498,18 @@ class GroupAdminPlugin(MaiBotPlugin):
             return
         if self.config.logging.verbose_logging:
             self.ctx.logger.info(
-                f"[群管理] 图片审核排队: group={group_id} user={user_id} mid={message_id} images={len(images)}"
+                f"[群管理] 图片审核排队: group={group_id} user={user_id} mid={message_id} "
+                f"images={len(images)} forwarded_record={forwarded_record_single_message}"
             )
         self._audit_tasks[task_key] = asyncio.create_task(
-            self._run_image_moderation(group_id, user_id, images, stream_id, message_id)
+            self._run_image_moderation(
+                group_id,
+                user_id,
+                images,
+                stream_id,
+                message_id,
+                forwarded_record_single_message=forwarded_record_single_message,
+            )
         )
 
     async def _run_llm_moderation(
@@ -1689,28 +1967,70 @@ class GroupAdminPlugin(MaiBotPlugin):
             self.ctx.logger.warning(f"[群管理] 查询群主失败: group={group_id}: {e}")
         return 0
 
-    async def _generate_image_unknown_notice(self, unreadable_count: int) -> str:
-        fallback = f" 有{unreadable_count}张图片没有完成识别，麻烦人工看一下要不要处理。"
+    @staticmethod
+    def _format_unreadable_kind(type_counts: dict[str, int]) -> str:
+        image_count = int(type_counts.get("图片", 0) or 0)
+        emoji_count = int(type_counts.get("表情包", 0) or 0)
+        if image_count > 0 and emoji_count > 0:
+            return "图片/表情包"
+        if emoji_count > 0:
+            return "表情包"
+        return "图片"
+
+    @staticmethod
+    def _format_unreadable_kind_detail(type_counts: dict[str, int]) -> str:
+        parts: list[str] = []
+        image_count = int(type_counts.get("图片", 0) or 0)
+        emoji_count = int(type_counts.get("表情包", 0) or 0)
+        if image_count > 0:
+            parts.append(f"{image_count}张图片")
+        if emoji_count > 0:
+            parts.append(f"{emoji_count}个表情包")
+        return "、".join(parts) if parts else "0个图片/表情包"
+
+    async def _generate_image_unknown_notice(
+        self,
+        unreadable_count: int,
+        unreadable_kind: str = "图片",
+        unreadable_kind_detail: str = "",
+    ) -> str:
+        unreadable_kind = str(unreadable_kind or "图片").strip() or "图片"
+        unreadable_kind_detail = str(unreadable_kind_detail or "").strip() or f"{unreadable_count}个{unreadable_kind}"
+        fallback = f" 有{unreadable_kind_detail}没有完成识别，麻烦人工看一下要不要处理。"
         if not getattr(self.config.auto_moderate, "image_unknown_notice_use_llm", False):
             return fallback
-        prompt = (
-            "你是QQ群里的群管理助手，需要写一句很短的中文提示给群主或管理员。"
-            "场景：有图片描述为空或超时，自动审核无法确认图片内容，需要群主或管理员人工查看。"
-            "要求：自然、简短、不要说已经违规、不要要求撤回、不要包含@、不要解释技术细节。"
-            f"未完成识别的图片数量：{unreadable_count}\n"
-            "只输出一句话。"
-        )
+        prompt_template = str(getattr(self.config.prompts, "image_unknown_notice_prompt", "") or "").strip()
+        if not prompt_template:
+            prompt_template = PromptsSectionConfig().image_unknown_notice_prompt
+        bot_nickname = str(getattr(self.config.identity, "bot_nickname", "") or "麦麦").strip() or "麦麦"
+        bot_style_context = "请严格遵守系统消息中的 MaiBot 身份、人格设定、表达方式与群管理呼叫任务边界。"
         try:
-            result = await self.ctx.llm.generate(prompt=prompt, model="replyer", temperature=0.5, max_tokens=60)
-            if isinstance(result, dict) and result.get("success"):
-                text = str(result.get("response", "")).strip()
-                text = re.sub(r"^```.*?```$", "", text, flags=re.S).strip()
-                text = text.strip('"').strip("'").strip("“”「」")
-                text = re.sub(r"@\S+", "", text).strip()
-                if text:
-                    return " " + text[:120]
+            prompt = prompt_template.format(
+                bot_style_context=bot_style_context,
+                bot_nickname=bot_nickname,
+                unreadable_count=unreadable_count,
+                unreadable_kind=unreadable_kind,
+                unreadable_kind_detail=unreadable_kind_detail,
+            )
         except Exception as e:
-            self.ctx.logger.warning(f"[群管理] 生成图片未知风险通知失败: {e}")
+            self.ctx.logger.warning(f"[群管理] 图片未知风险通知提示词格式化失败: {e}")
+            prompt = PromptsSectionConfig().image_unknown_notice_prompt.format(
+                bot_style_context=bot_style_context,
+                bot_nickname=bot_nickname,
+                unreadable_count=unreadable_count,
+                unreadable_kind=unreadable_kind,
+                unreadable_kind_detail=unreadable_kind_detail,
+            )
+        system_prompt = await self._build_host_persona_context()
+        draft = await self._request_notice_llm_text(prompt, system_prompt=system_prompt, temperature=0.5)
+        if draft:
+            reply_style = str(getattr(self, "_host_reply_style", "") or "").strip()
+            if reply_style and system_prompt.strip():
+                styled = await self._rewrite_notice_in_host_style(draft, system_prompt=system_prompt, reply_style=reply_style)
+                if styled:
+                    return " " + styled
+                self.ctx.logger.warning("[群管理] 图片未知风险通知风格重写失败，回退到初稿")
+            return " " + draft
         return fallback
 
     async def _notify_group_manager_for_image_unknown(
@@ -1720,6 +2040,9 @@ class GroupAdminPlugin(MaiBotPlugin):
         stream_id: str,
         message_id: str,
         unreadable_count: int,
+        unreadable_summary: str = "",
+        unreadable_kind: str = "图片",
+        unreadable_kind_detail: str = "",
     ) -> bool:
         bot_id = self._to_int(self.config.identity.bot_qq) or self._bot_self_id or 0
         manager_id = self._find_recent_group_manager_for_notice(group_id, exclude_user_id=user_id, bot_id=bot_id)
@@ -1732,12 +2055,25 @@ class GroupAdminPlugin(MaiBotPlugin):
                     f"group={group_id} user={user_id} mid={message_id}"
                 )
             return False
-        suffix = await self._generate_image_unknown_notice(unreadable_count)
-        await self._send_at_text(stream_id, "", manager_id, suffix)
+        notify_stream_id = await self._resolve_group_stream_id(group_id, stream_id)
+        if not notify_stream_id:
+            self.ctx.logger.warning(
+                f"[群管理] 图片未知风险未通知: 缺少可用stream_id group={group_id} "
+                f"user={user_id} manager={manager_id} mid={message_id}"
+            )
+            return False
+        suffix = await self._generate_image_unknown_notice(
+            unreadable_count,
+            unreadable_kind=unreadable_kind,
+            unreadable_kind_detail=unreadable_kind_detail,
+        )
+        await self._send_at_text(notify_stream_id, "", manager_id, suffix)
         if self.config.logging.verbose_logging:
+            detail_text = f" details={unreadable_summary}" if unreadable_summary else ""
             self.ctx.logger.info(
                 f"[群管理] 图片未知风险已通知群主或管理员: group={group_id} user={user_id} manager={manager_id} "
-                f"mid={message_id} unreadable={unreadable_count}"
+                f"mid={message_id} unreadable={unreadable_count} kind={unreadable_kind} "
+                f"kind_detail={unreadable_kind_detail}{detail_text} stream={notify_stream_id}"
             )
         return True
 
@@ -2438,6 +2774,7 @@ class GroupAdminPlugin(MaiBotPlugin):
                 task.cancel()
         self._audit_tasks.clear()
         self._audit_seen_messages.clear()
+        self._seen_emoji_hashes.clear()
 
     @Command("admin_reload", description="热重载配置", pattern=r"/admin\s+reload")
     async def cmd_admin_reload(self, stream_id: str = "", **kwargs: Any):
@@ -2670,7 +3007,14 @@ class GroupAdminPlugin(MaiBotPlugin):
                 stream_id,
                 forwarded_record_single_message=forwarded_record_single_message,
             )
-            self._schedule_image_moderation(group_id, sender_id, image_segments, msg_id, stream_id)
+            self._schedule_image_moderation(
+                group_id,
+                sender_id,
+                image_segments,
+                msg_id,
+                stream_id,
+                forwarded_record_single_message=forwarded_record_single_message,
+            )
         if time.time() - self._last_cleanup_time > 3600:
             self._cleanup_memory()
         return {"continue_processing": True}
@@ -2742,7 +3086,14 @@ class GroupAdminPlugin(MaiBotPlugin):
                     stream_for_reply,
                     forwarded_record_single_message=forwarded_record_single_message,
                 )
-                self._schedule_image_moderation(group_id, sender_id, image_segments, msg_id, stream_for_reply)
+                self._schedule_image_moderation(
+                    group_id,
+                    sender_id,
+                    image_segments,
+                    msg_id,
+                    stream_for_reply,
+                    forwarded_record_single_message=forwarded_record_single_message,
+                )
         return {"action": "continue"}
 
     # =========================================================================
