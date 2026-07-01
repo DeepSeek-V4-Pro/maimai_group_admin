@@ -55,6 +55,8 @@ class AutoModerateSectionConfig(PluginConfigBase):
         default=True,
         description="将QQ合并转发聊天记录作为单条消息整体审核，不把内部多条记录视为发送者连续刷屏",
     )
+    auto_recall: bool = Field(default=False, description="审核结论要求撤回时是否自动撤回原消息")
+    trigger_moderation_reply: bool = Field(default=True, description="处置成功后是否触发麦麦主动回复")
 
 class SafeguardSectionConfig(PluginConfigBase):
     __ui_label__ = "安全管理"; __ui_icon__ = "shield-off"; __ui_order__ = 4
@@ -606,6 +608,91 @@ class GroupAdminPlugin(MaiBotPlugin):
             "duration 仅 action=mute 时使用，单位秒；轻度刷屏 300-600，辱骂/广告 600-1800，严重风险最高 3600。"
         )
 
+    async def _generate_moderation_notice(self, violation_type: str, reason: str) -> str:
+        prompt = (
+            "你是当前群聊里的角色“星期六”，需要对刚刚的群管理处理自然接一句短话。\n"
+            "要求：保持人设和口吻，像群里自然说话；不要说“已警告/已禁言/系统判定/插件/审核”；"
+            "不要长篇说教，不要@任何人，不要输出括号说明。\n"
+            f"违规类型：{violation_type}\n原因：{reason}\n"
+            "只输出一句中文短回复。"
+        )
+        try:
+            result = await self.ctx.llm.generate(prompt=prompt, model="replyer", temperature=0.6, max_tokens=60)
+            if isinstance(result, dict) and result.get("success"):
+                text = str(result.get("response", "")).strip()
+                text = re.sub(r"^```.*?```$", "", text, flags=re.S).strip()
+                text = text.strip('"').strip("'").strip("“”「」")
+                if text:
+                    return text[:120]
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 生成人设提醒失败: {e}")
+        return "先停一下，这个不太适合继续刷屏喵。"
+
+    async def _resolve_group_stream_id(self, group_id: int, stream_id: str = "") -> str:
+        stream_id = str(stream_id or "").strip()
+        if stream_id:
+            return stream_id
+        try:
+            stream = await self.ctx.call_capability("chat.get_stream_by_group_id", group_id=str(group_id), platform="qq")
+            if isinstance(stream, dict):
+                sid = str(stream.get("stream_id") or stream.get("session_id") or stream.get("id") or "").strip()
+                if sid:
+                    return sid
+            opened = await self.ctx.call_capability(
+                "chat.open_session",
+                platform="qq",
+                chat_type="group",
+                group_id=str(group_id),
+            )
+            if isinstance(opened, dict):
+                stream_obj = opened.get("stream") if isinstance(opened.get("stream"), dict) else opened
+                sid = str(stream_obj.get("stream_id") or stream_obj.get("session_id") or stream_obj.get("id") or "").strip()
+                if sid:
+                    return sid
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 解析群聊stream失败: group={group_id} err={e}")
+        return ""
+
+    async def _trigger_native_moderation_reply(self, stream_id: str, group_id: int, action: str, violation_type: str, reason: str):
+        stream_id = await self._resolve_group_stream_id(group_id, stream_id)
+        if not stream_id:
+            if self.config.logging.verbose_logging:
+                self.ctx.logger.warning(f"[群管理] 无法触发Maisaka回复: 缺少stream_id group={group_id}")
+            return
+        intent = (
+            "群管理插件刚刚完成了一次违规处理。请基于当前聊天上下文走原生回复流程，"
+            "用你的人设自然回应一句，重点是维持群聊氛围和说明边界；"
+            "不要机械播报禁言结果，不要复述违规原文或链接，不要提插件、审核流程或JSON。"
+            f"处理动作={action}，违规类型={violation_type}，原因={reason}"
+        )
+        try:
+            result = await self.ctx.call_capability(
+                "maisaka.proactive.trigger",
+                stream_id=stream_id,
+                intent=intent,
+                reason="group_admin_moderation_action",
+                priority="high",
+                metadata={
+                    "group_id": group_id,
+                    "action": action,
+                    "violation_type": violation_type,
+                    "reason": reason,
+                },
+            )
+            if self.config.logging.verbose_logging:
+                self.ctx.logger.info(f"[群管理] 已触发Maisaka原生回复: group={group_id} stream={stream_id} result={result}")
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 触发Maisaka原生回复失败: group={group_id} stream={stream_id} err={e}")
+
+    async def _maybe_recall_audited_message(self, group_id: int, message_id: str, reason: str) -> None:
+        if not message_id or self._to_int(message_id) <= 0:
+            if self.config.logging.verbose_logging:
+                self.ctx.logger.info(f"[群管理] 跳过自动撤回: message_id无效 group={group_id} mid={message_id}")
+            return
+        result = await self.tool_recall_msg(group_id=group_id, message_id=message_id, reason=reason)
+        if self.config.logging.verbose_logging:
+            self.ctx.logger.info(f"[群管理] 自动撤回结果: group={group_id} mid={message_id} result={result}")
+
     async def _run_llm_moderation(
         self,
         group_id: int,
@@ -706,9 +793,10 @@ class GroupAdminPlugin(MaiBotPlugin):
                 result = await self.tool_warn_user(group_id=group_id, user_id=user_id, violation_type=violation_type, reason=reason)
                 content = str(result.get("content", "")) if isinstance(result, dict) else ""
                 if content.startswith("已向"):
-                    if recall_message:
+                    if recall_message and self.config.auto_moderate.auto_recall:
                         await self._maybe_recall_audited_message(group_id, message_id, reason)
-                    await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
+                    if self.config.auto_moderate.trigger_moderation_reply:
+                        await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
                 return
             duration = self._to_int(verdict.get("duration", 0))
             if duration <= 0:
@@ -721,9 +809,10 @@ class GroupAdminPlugin(MaiBotPlugin):
             result = await self.tool_mute_user(group_id=group_id, user_id=user_id, duration=duration, reason=reason)
             content = str(result.get("content", "")) if isinstance(result, dict) else ""
             if content.startswith("已将"):
-                if recall_message:
+                if recall_message and self.config.auto_moderate.auto_recall:
                     await self._maybe_recall_audited_message(group_id, message_id, reason)
-                await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
+                if self.config.auto_moderate.trigger_moderation_reply:
+                    await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
         except Exception as e:
             self.ctx.logger.error(f"[群管理] 入站LLM审核异常: {e}", exc_info=True)
         finally:
@@ -1059,10 +1148,10 @@ class GroupAdminPlugin(MaiBotPlugin):
     # Tool: group_warn_user
     # =========================================================================
 
-    @Tool("group_warn_user", description="对指定群成员发出正式警告并记录, violation_type 为 spam(刷屏)/abuse(辱骂)/ad(广告)", parameters=[
+    @Tool("group_warn_user", description="对指定群成员发出正式警告并记录, violation_type 为 spam(刷屏)/abuse(辱骂)/ad(广告)/sexual(涉黄内容)/illegal(违法内容)", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
-        ToolParameterInfo(name="violation_type", param_type=ToolParamType.STRING, description="违规类型: spam/abuse/ad", required=True),
+        ToolParameterInfo(name="violation_type", param_type=ToolParamType.STRING, description="违规类型: spam/abuse/ad/sexual/illegal", required=True),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="警告原因(简要说明违规内容)", required=True),
     ])
     async def tool_warn_user(self, group_id: int = 0, user_id: int = 0, violation_type: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
@@ -1076,9 +1165,20 @@ class GroupAdminPlugin(MaiBotPlugin):
             is_protected, msg = await self._is_protected(group_id, user_id)
             if is_protected: return {"name": "group_warn_user", "content": f"无法警告: {msg}"}
             self._warnings.setdefault(group_id, {}).setdefault(user_id, {}).setdefault(violation_type, []).append((time.time(), 1))
-            type_cn = {"spam": "刷屏", "abuse": "辱骂", "ad": "广告"}.get(violation_type, violation_type)
-            warn_text = f"⚠ 提醒: {reason}"
-            await self.ctx.send.text(warn_text, stream_id if stream_id else str(group_id))
+            type_cn = {
+                "spam": "刷屏",
+                "abuse": "辱骂",
+                "ad": "广告",
+                "sexual": "涉黄内容",
+                "illegal": "违法内容",
+            }.get(violation_type, violation_type)
+            warn_text = await self._generate_moderation_notice(violation_type, reason)
+            warn_text = f"⚠ {warn_text.lstrip('⚠ ').strip()}"
+            warn_stream_id = await self._resolve_group_stream_id(group_id, stream_id)
+            if warn_stream_id:
+                await self.ctx.send.text(warn_text, warn_stream_id)
+            else:
+                self.ctx.logger.warning(f"[群管理] 无法发送警告消息: group={group_id} user={user_id} reason={reason}")
             over, current, thresh = self._check_warning_threshold(group_id, user_id, violation_type)
             self._add_log(group_id, "warn", user_id, reason, True)
             extra = f"\n该用户 {type_cn} 类提醒已达 {current}/{thresh}，请注意是否需要升级处理。" if over else ""
@@ -1697,6 +1797,12 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._disabled_groups.clear()
         self._get_member_called.clear()
         self._last_mute_time.clear()
+        self._recent_user_messages.clear()
+        for task in list(self._audit_tasks.values()):
+            if task and not task.done():
+                task.cancel()
+        self._audit_tasks.clear()
+        self._audit_seen_messages.clear()
 
     @Command("admin_reload", description="热重载配置", pattern=r"/admin\s+reload")
     async def cmd_admin_reload(self, stream_id: str = "", **kwargs: Any):

@@ -21,6 +21,8 @@ enabled_groups = []
 audit_model = "planner"
 audit_max_tokens = 220
 treat_forwarded_records_as_single_message = true
+auto_recall = false
+trigger_moderation_reply = true
 
 [safeguard]
 max_mute_duration = 3600
