@@ -63,6 +63,8 @@ class AutoModerateSectionConfig(PluginConfigBase):
         default="none",
         description="图片描述为空/超时的处理策略: none=仅记录并审核其余图片, warn=警告, notify_admin=通知最后发言的群主或管理员，找不到则通知群主",
     )
+    image_unknown_notice_use_llm: bool = Field(default=False, description="通知群主或管理员处理未知图片风险时是否使用LLM生成提示文本")
+    image_unknown_notice_model: str = Field(default="replyer", description="图片未知风险通知使用的模型任务名")
     expand_forwarded_records: bool = Field(default=True, description="是否尝试展开QQ合并转发内容进行审核")
     treat_forwarded_records_as_single_message: bool = Field(
         default=True,
@@ -149,6 +151,15 @@ class PromptsSectionConfig(PluginConfigBase):
         "\n"
         "节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过"
     ), description="自动审核系统提示词")
+    image_unknown_notice_prompt: str = Field(default=(
+        "{bot_style_context}\n\n"
+        "需要用现人设和口吻写一句很短的中文提示，"
+        "呼叫群主或管理员人工查看。"
+        "场景：有{unreadable_kind_detail}描述为空或超时，自动审核无法确认{unreadable_kind}内容。"
+        "要求：自然、简短、像群里正常说话；不要说已经违规；不要要求撤回；"
+        "不要包含@；不要解释技术细节；不要输出括号说明。"
+        "只输出一句话。"
+    ), description="图片/表情包描述为空/超时时，LLM生成呼叫群主或管理员提示的提示词。可用变量: {bot_style_context}, {bot_nickname}, {unreadable_count}, {unreadable_kind}, {unreadable_kind_detail}")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 
 class GroupAdminConfig(PluginConfigBase):
@@ -1985,7 +1996,42 @@ class GroupAdminPlugin(MaiBotPlugin):
     ) -> str:
         unreadable_kind = str(unreadable_kind or "图片").strip() or "图片"
         unreadable_kind_detail = str(unreadable_kind_detail or "").strip() or f"{unreadable_count}个{unreadable_kind}"
-        return f" 有{unreadable_kind_detail}没有完成识别，麻烦人工看一下要不要处理。"
+        fallback = f" 有{unreadable_kind_detail}没有完成识别，麻烦人工看一下要不要处理。"
+        if not getattr(self.config.auto_moderate, "image_unknown_notice_use_llm", False):
+            return fallback
+        prompt_template = str(getattr(self.config.prompts, "image_unknown_notice_prompt", "") or "").strip()
+        if not prompt_template:
+            prompt_template = PromptsSectionConfig().image_unknown_notice_prompt
+        bot_nickname = str(getattr(self.config.identity, "bot_nickname", "") or "麦麦").strip() or "麦麦"
+        bot_style_context = "请严格遵守系统消息中的 MaiBot 身份、人格设定、表达方式与群管理呼叫任务边界。"
+        try:
+            prompt = prompt_template.format(
+                bot_style_context=bot_style_context,
+                bot_nickname=bot_nickname,
+                unreadable_count=unreadable_count,
+                unreadable_kind=unreadable_kind,
+                unreadable_kind_detail=unreadable_kind_detail,
+            )
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 图片未知风险通知提示词格式化失败: {e}")
+            prompt = PromptsSectionConfig().image_unknown_notice_prompt.format(
+                bot_style_context=bot_style_context,
+                bot_nickname=bot_nickname,
+                unreadable_count=unreadable_count,
+                unreadable_kind=unreadable_kind,
+                unreadable_kind_detail=unreadable_kind_detail,
+            )
+        system_prompt = await self._build_host_persona_context()
+        draft = await self._request_notice_llm_text(prompt, system_prompt=system_prompt, temperature=0.5)
+        if draft:
+            reply_style = str(getattr(self, "_host_reply_style", "") or "").strip()
+            if reply_style and system_prompt.strip():
+                styled = await self._rewrite_notice_in_host_style(draft, system_prompt=system_prompt, reply_style=reply_style)
+                if styled:
+                    return " " + styled
+                self.ctx.logger.warning("[群管理] 图片未知风险通知风格重写失败，回退到初稿")
+            return " " + draft
+        return fallback
 
     async def _notify_group_manager_for_image_unknown(
         self,
