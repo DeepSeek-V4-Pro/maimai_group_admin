@@ -141,9 +141,21 @@ WebUI → 插件管理 → 找到 `maimai.group-admin` → 点击启用
 | `enabled_groups` | list[string] | `[]` | **必须填写**需要管理的群号列表，如 `["123456789"]`。留空不生效 |
 | `audit_model` | string | `"planner"` | 入站 LLM 审核使用的任务模型，如 `planner` / `utils` / `replyer` |
 | `audit_max_tokens` | int | `220` | 入站 LLM 审核最大输出 token 数；使用思考模型或 JSON 被截断时可调大 |
+| `audit_confidence_gate` | bool | `true` | 是否启用自动审核置信度门槛；开启后低于阈值的 `warn` / `mute` 不执行 |
+| `audit_confidence_threshold` | float | `0.72` | 自动审核执行 `warn` / `mute` 的最低置信度，范围 `0.0`-`1.0` |
+| `audit_images` | bool | `true` | 是否审核图片/表情消息；关闭后只审核文本内容 |
+| `image_audit_max_images` | int | `4` | 单条消息最多审核的图片/表情数量 |
+| `image_description_timeout` | float | `12.0` | 单张图片等待描述生成的最长秒数 |
+| `image_unknown_policy` | string | `"none"` | 图片描述为空或超时时的策略：`none` 仅记录并审核其余图片；`warn` 警告用户但不撤回；`notify_admin` @ 最后发言的群主或管理员人工处理，找不到则通知群主 |
+| `image_unknown_notice_use_llm` | bool | `false` | `notify_admin` 时是否使用 LLM 生成通知群主或管理员的提示文本；关闭时使用固定文案 |
+| `expand_forwarded_records` | bool | `true` | 是否尝试展开 QQ 合并转发内部内容进行审核；关闭后只按消息摘要/外层文本审核 |
 | `treat_forwarded_records_as_single_message` | bool | `true` | 将 QQ 合并转发聊天记录作为单条消息整体审核，不把转发内部多条记录视为发送者连续刷屏 |
+| `auto_recall` | bool | `false` | 审核结论要求撤回时是否自动撤回原消息；默认关闭以降低误操作风险 |
+| `trigger_moderation_reply` | bool | `true` | 处置成功后是否触发麦麦主动回复 |
 
 > **注意**：`enabled_groups` 为空时插件不会在任何群启动自动审核。
+> **图片审核说明**：`image_unknown_policy` 只处理图片描述为空/超时的未知风险；同一条消息中已经取得描述的图片仍会继续提交 LLM 审核。图片描述模型拒答会作为重要风险证据提交给 LLM 判断；是否处罚或撤回以 LLM 输出的 `action` / `recall` 为准。
+> **处罚策略说明**：`prompts.auto_moderate_system` 会同时注入麦麦管理上下文和自动入站审核 prompt；自动审核会优先参考这里的处罚尺度，再按 JSON 输出约束返回 `none` / `warn` / `mute` / `recall`。
 
 ---
 
@@ -702,7 +714,38 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ## 更新日志
 
-### v1.5.0 (2026-06-30)
+### Fork 版改动 (2026-07-01)
+
+> 以下为本 fork 在原作者版本基础上的改动，不属于原作者发布的 v1.5.0 更新内容。
+
+**入站自动审核增强**
+- 新增入站 LLM 审核链路：从 `chat.receive` / `chat.receive.after_process` 提取发送者、文本、图片和消息 ID，并按群白名单异步排队审核
+- 新增审核 JSON 约束，自动解析 `action` / `violation_type` / `confidence` / `duration` / `recall` / `reason`
+- 新增置信度门槛：`warn` / `mute` 低于 `audit_confidence_threshold` 时不会自动执行，降低误判处置风险
+- 新增同一用户近期消息缓存，刷屏判断会参考短期历史，避免把单条链接、文件或普通分享误判为 spam
+- 新增审核任务去重和清理：同一消息不会重复审核，完成任务和过期消息记录会随 `_cleanup_memory` 回收
+
+**图片与合并转发审核**
+- 新增图片/表情审核：支持从 hash、base64 或 URL 获取图片描述，并将描述交给入站 LLM 判断
+- 新增图片描述超时/为空处理策略：`none`、`warn`、`notify_admin`
+- `notify_admin` 会 @ 最后发言的群主或管理员人工复核；若近期没有群主/管理员发言记录，则直接通知群主
+- 新增 QQ 合并转发识别与展开，尽量读取内部文本和图片后整体审核
+- 合并转发默认按单条消息计入近期历史，避免把转发内部多条记录误当作发送者刷屏
+
+**自动处置与对话联动**
+- 入站审核结论可自动调用现有 `group_warn_user` / `group_mute_user` / `group_recall_msg`
+- 新增 `auto_recall` 开关，审核要求撤回时可选择是否自动撤回原消息
+- 新增 `trigger_moderation_reply` 开关，处置成功后可触发麦麦主动回复
+- `group_warn_user` 扩展违规类型：新增 `sexual` / `illegal`
+- 警告文本改为优先由 LLM 生成自然提示，并通过 `chat.get_stream_by_group_id` / `chat.open_session` 尝试定位群会话发送
+
+**配置与 capability**
+- `[auto_moderate]` 新增 `audit_model`、`audit_max_tokens`、`audit_confidence_gate`、`audit_confidence_threshold`
+- `[auto_moderate]` 新增 `audit_images`、`image_audit_max_images`、`image_description_timeout`、`image_unknown_policy`、`image_unknown_notice_use_llm`
+- `[auto_moderate]` 新增 `expand_forwarded_records`、`treat_forwarded_records_as_single_message`、`auto_recall`、`trigger_moderation_reply`
+- `_manifest.json` 新增 `chat.get_stream_by_group_id`、`chat.open_session`、`llm.generate`、`maisaka.proactive.trigger` capability
+
+### v1.5.0 (2026-06-30, 原作者版本)
 
 **全面质量修复（22 项）**
 

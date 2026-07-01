@@ -53,10 +53,23 @@ class AutoModerateSectionConfig(PluginConfigBase):
     enabled_groups: list[str] = Field(default_factory=list, description="启用插件的群号白名单")
     audit_model: str = Field(default="planner", description="入站LLM审核使用的任务模型，如 planner/utils/replyer")
     audit_max_tokens: int = Field(default=220, description="入站LLM审核最大输出token数")
+    audit_confidence_gate: bool = Field(default=True, description="是否启用入站审核置信度门槛")
+    audit_confidence_threshold: float = Field(default=0.72, description="入站审核执行warn/mute的最低置信度")
+    audit_images: bool = Field(default=True, description="是否审核图片/表情消息")
+    image_audit_max_images: int = Field(default=4, description="单条消息最多审核的图片/表情数量")
+    image_description_timeout: float = Field(default=12.0, description="单张图片等待描述生成的最长秒数")
+    image_unknown_policy: str = Field(
+        default="none",
+        description="图片描述为空/超时的处理策略: none=仅记录并审核其余图片, warn=警告, notify_admin=通知最后发言的群主或管理员，找不到则通知群主",
+    )
+    image_unknown_notice_use_llm: bool = Field(default=False, description="通知群主或管理员处理未知图片风险时是否使用LLM生成提示文本")
+    expand_forwarded_records: bool = Field(default=True, description="是否尝试展开QQ合并转发内容进行审核")
     treat_forwarded_records_as_single_message: bool = Field(
         default=True,
         description="将QQ合并转发聊天记录作为单条消息整体审核，不把内部多条记录视为发送者连续刷屏",
     )
+    auto_recall: bool = Field(default=False, description="审核结论要求撤回时是否自动撤回原消息")
+    trigger_moderation_reply: bool = Field(default=True, description="处置成功后是否触发麦麦主动回复")
 
 class SafeguardSectionConfig(PluginConfigBase):
     __ui_label__ = "安全管理"; __ui_icon__ = "shield-off"; __ui_order__ = 4
@@ -172,6 +185,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._daily_reject_count: dict[int, dict[str, int]] = {}
         self._warnings: dict[int, dict[int, dict[str, list[tuple[float, int]]]]] = {}
         self._recent_user_messages: dict[tuple[Any, ...], deque[tuple[float, str]]] = {}
+        self._recent_group_managers: dict[int, deque[tuple[float, int, str]]] = {}
         self._audit_tasks: dict[tuple[Any, ...], asyncio.Task] = {}
         self._audit_seen_messages: dict[str, float] = {}
         self._op_log: deque[dict[str, Any]] = deque(maxlen=5000)
@@ -438,6 +452,22 @@ class GroupAdminPlugin(MaiBotPlugin):
             )
             if not self._recent_user_messages[key]:
                 del self._recent_user_messages[key]
+        for gid in list(self._recent_group_managers.keys()):
+            recent_group_managers = []
+            for item in self._recent_group_managers[gid]:
+                if len(item) == 2:
+                    ts, uid = item
+                    role = "admin"
+                else:
+                    ts, uid, role = item
+                if now - ts <= 3600:
+                    recent_group_managers.append((ts, uid, role))
+            self._recent_group_managers[gid] = deque(
+                recent_group_managers,
+                maxlen=12,
+            )
+            if not self._recent_group_managers[gid]:
+                del self._recent_group_managers[gid]
         for key, task in list(self._audit_tasks.items()):
             if task.done():
                 del self._audit_tasks[key]
@@ -787,6 +817,8 @@ class GroupAdminPlugin(MaiBotPlugin):
         text: str,
         image_segments: list[dict[str, str]],
     ) -> tuple[str, list[dict[str, str]]]:
+        if not self.config.auto_moderate.expand_forwarded_records:
+            return text, image_segments
         forward_ids = self._extract_forward_record_ids(message, text)
         if not forward_ids:
             return text, image_segments
@@ -880,19 +912,6 @@ class GroupAdminPlugin(MaiBotPlugin):
                 return data
         return {}
 
-    def _is_vlm_sensitive_refusal(self, text: str) -> bool:
-        if not text.lstrip().startswith("[图片消息]"):
-            return False
-        refusal_markers = (
-            "抱歉，我无法满足",
-            "无法按要求描述",
-            "无法描述这张图片",
-            "不能描述这张图片",
-            "不能协助描述",
-            "无法提供该图片的具体内容",
-        )
-        return any(marker in text for marker in refusal_markers)
-
     def _build_audit_prompt(
         self,
         group_id: int,
@@ -915,17 +934,31 @@ class GroupAdminPlugin(MaiBotPlugin):
             if forwarded_record_single_message
             else ""
         )
+        role = self._get_group_role(group_id) or "member"
+        if role == "owner":
+            available = "禁言/解禁/踢人/警告/设精华/撤回/公告/改名/审批入群"
+        elif role == "admin":
+            available = "禁言/解禁/踢人/警告/设精华/撤回/改名片/审批入群"
+        else:
+            available = "管理操作受限，可协助管理员做决策建议"
+        policy_prompt = str(self.config.prompts.auto_moderate_system or "").strip()
+        policy_prompt = policy_prompt.replace("{bot_role}", role).replace("{available_actions}", available)
         return (
             "你是QQ群入站消息审核器。请根据语义判断是否需要群管理动作，不要按关键词机械判定。\n"
+            "必须优先遵守下面“群内处罚策略”里的处罚尺度、从宽/从严规则和不处理规则；"
+            "若群内处罚策略与通用识别规则冲突，除图片模型拒答、明确色情违法、诈骗广告、严重辱骂等高风险止损场景外，优先按群内处罚策略执行。\n\n"
+            f"群内处罚策略：\n{policy_prompt or '- 未配置'}\n\n"
             "你需要识别：连续刷屏、辱骂/人身攻击、广告/诈骗/赌博/交易诱导、色情/违法/血腥惊吓、恶意引战。\n"
             "如果 current_message 是图片描述，需按图片内容判断；图片描述模型拒答（如“抱歉，我无法满足该请求”、“无法描述该图片”、“不能协助”）"
-            "代表视觉模型已经遇到高风险敏感图像，不允许返回 none；应按最可能类型返回 warn 或 mute，并设置 recall=true。\n"
-            "如果图片描述出现裸露、色情意味、露骨、挑逗姿势、性暗示、下体/性器官、体液、血腥暴力或违法内容，也不允许仅提醒不撤回；"
-            "应设置 recall=true，violation_type 优先使用 sexual 或 illegal。\n"
+            "通常意味着视觉模型遇到敏感或高风险图像，但也可能是误拒答；请把拒答作为重要风险证据，结合群内处罚策略、上下文和同条消息其他描述判断是否 warn/mute/recall。\n"
+            "如果 current_message 包含“图片描述失败/为空或超时”，这代表该图片未被看见，不等于安全；"
+            "若同条消息的其他图片描述或上下文存在风险倾向，应按群内处罚策略保守判断。\n"
+            "如果图片描述出现裸露、色情意味、露骨、挑逗姿势、性暗示、下体/性器官、体液、血腥暴力或违法内容，"
+            "violation_type 优先使用 sexual 或 illegal；是否 recall 按群内处罚策略和风险程度决定。\n"
             "普通口癖、玩笑、轻微情绪、无明确对象的吐槽、正常聊天，一律不要处罚。\n"
             "只有把握较高时才返回 warn 或 mute；不确定必须返回 none。\n\n"
-            "recall 表示是否应该撤回当前这条消息：广告/诈骗链接、严重辱骂、色情违法、隐私泄露等应为 true；"
-            "普通刷屏或不确定时应为 false。\n"
+            "recall 表示是否应该撤回当前这条消息：按群内处罚策略和风险程度决定；"
+            "普通刷屏、轻微问题或不确定时应为 false。\n"
             f"{forwarded_note}"
             "Do not classify a single file share or a single link as spam. Only classify spam when same_user_recent_messages shows the same user repeatedly sent highly similar content.\n"
             f"group_id: {group_id}\nuser_id: {user_id}\n"
@@ -1077,21 +1110,91 @@ class GroupAdminPlugin(MaiBotPlugin):
         message_id: str = "",
     ) -> None:
         try:
+            is_protected, protected_reason = await self._is_protected(group_id, user_id)
+            if is_protected:
+                if self.config.logging.verbose_logging:
+                    self.ctx.logger.info(
+                        f"[群管理] 图片审核跳过受保护用户: group={group_id} user={user_id} reason={protected_reason}"
+                    )
+                return
+            image_limit = self._to_int(getattr(self.config.auto_moderate, "image_audit_max_images", 4))
+            if image_limit <= 0:
+                image_limit = 4
+            try:
+                description_timeout = float(getattr(self.config.auto_moderate, "image_description_timeout", 12.0))
+            except Exception:
+                description_timeout = 12.0
+            description_timeout = max(3.0, min(description_timeout, 60.0))
+            unknown_policy = str(getattr(self.config.auto_moderate, "image_unknown_policy", "none") or "none").strip().lower()
             descriptions: list[str] = []
-            for index, image_info in enumerate(images[:4], start=1):
-                desc = await self._get_image_description_for_audit(image_info)
+            unreadable_images: list[str] = []
+            for index, image_info in enumerate(images[:image_limit], start=1):
+                image_hash = str(image_info.get("hash") or "").strip()
+                desc = await self._get_image_description_for_audit(image_info, timeout=description_timeout)
                 if desc:
-                    image_hash = str(image_info.get("hash") or "").strip()
                     descriptions.append(f"{index}. hash={image_hash[:12] or 'unknown'} 描述：{desc}")
+                else:
+                    unreadable_images.append(f"{index}. hash={image_hash[:12] or 'unknown'} 描述状态：为空或超时，无法确认图片内容")
+            if unreadable_images and unknown_policy == "notify_admin":
+                await self._notify_group_manager_for_image_unknown(
+                    group_id,
+                    user_id,
+                    stream_id,
+                    message_id,
+                    len(unreadable_images),
+                )
+                if descriptions:
+                    audit_text = "[图片消息] 图片描述：\n" + "\n".join(descriptions)
+                    audit_text += "\n\n[图片描述失败]\n" + "\n".join(unreadable_images)
+                    self._schedule_llm_moderation(
+                        group_id,
+                        user_id,
+                        audit_text,
+                        message_id,
+                        stream_id,
+                        audit_kind="image",
+                    )
+                return
+            if unreadable_images and unknown_policy == "warn":
+                if descriptions:
+                    audit_text = "[图片消息] 图片描述：\n" + "\n".join(descriptions)
+                    audit_text += "\n\n[图片描述失败]\n" + "\n".join(unreadable_images)
+                    self._schedule_llm_moderation(
+                        group_id,
+                        user_id,
+                        audit_text,
+                        message_id,
+                        stream_id,
+                        audit_kind="image",
+                    )
+                reason = f"{len(unreadable_images)}张图片描述为空或超时，无法完成安全审核"
+                result = await self.tool_warn_user(
+                    group_id=group_id,
+                    user_id=user_id,
+                    violation_type="illegal",
+                    reason=reason,
+                )
+                content = str(result.get("content", "")) if isinstance(result, dict) else ""
+                if content.startswith("已向"):
+                    if self.config.auto_moderate.trigger_moderation_reply:
+                        await self._trigger_native_moderation_reply(stream_id, group_id, "warn", "illegal", reason)
+                if self.config.logging.verbose_logging:
+                    self.ctx.logger.info(
+                        f"[群管理] 图片描述失败按策略处置: group={group_id} user={user_id} mid={message_id} "
+                        f"unreadable={len(unreadable_images)} policy={unknown_policy}"
+                    )
+                return
             if not descriptions:
                 if self.config.logging.verbose_logging:
                     self.ctx.logger.info(f"[群管理] 图片审核跳过: 未取得图片描述 group={group_id} user={user_id} mid={message_id}")
                 return
             audit_text = "[图片消息] 图片描述：\n" + "\n".join(descriptions)
+            if unreadable_images:
+                audit_text += "\n\n[图片描述失败]\n" + "\n".join(unreadable_images)
             if self.config.logging.verbose_logging:
                 self.ctx.logger.info(
                     f"[群管理] 图片描述已取得，提交LLM审核: group={group_id} user={user_id} "
-                    f"mid={message_id} descriptions={len(descriptions)}"
+                    f"mid={message_id} descriptions={len(descriptions)} unreadable={len(unreadable_images)}"
                 )
             self._schedule_llm_moderation(
                 group_id,
@@ -1112,7 +1215,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         message_id: str = "",
         stream_id: str = "",
     ) -> None:
-        if not images or group_id <= 0 or user_id <= 0:
+        if not self.config.auto_moderate.audit_images or not images or group_id <= 0 or user_id <= 0:
             return
         seen_key = f"image_fetch:{message_id}" if message_id else ""
         if seen_key:
@@ -1173,6 +1276,12 @@ class GroupAdminPlugin(MaiBotPlugin):
                 confidence = float(verdict.get("confidence", 0))
             except Exception:
                 confidence = 0.0
+            confidence_gate = bool(getattr(self.config.auto_moderate, "audit_confidence_gate", True))
+            try:
+                confidence_threshold = float(getattr(self.config.auto_moderate, "audit_confidence_threshold", 0.72))
+            except Exception:
+                confidence_threshold = 0.72
+            confidence_threshold = max(0.0, min(confidence_threshold, 1.0))
             recall_raw = verdict.get("recall", False)
             recall_message = recall_raw is True or str(recall_raw).strip().lower() in ("true", "1", "yes")
             is_image_audit = text.lstrip().startswith("[图片消息]")
@@ -1182,17 +1291,8 @@ class GroupAdminPlugin(MaiBotPlugin):
                     f"action={action} type={violation_type} confidence={confidence:.2f} "
                     f"recall={recall_message} reason={reason}"
                 )
-            if (action not in ("warn", "mute") or confidence < 0.72) and is_image_audit and self._is_vlm_sensitive_refusal(text):
-                action = "warn"
-                violation_type = "sexual"
-                confidence = max(confidence, 0.9)
-                recall_message = True
-                reason = "图片描述模型拒绝描述，疑似敏感涉黄内容"
-                if self.config.logging.verbose_logging:
-                    self.ctx.logger.info(
-                        f"[群管理] 图片审核按VLM拒答升级: group={group_id} user={user_id} mid={message_id}"
-                    )
-            if action not in ("warn", "mute") or confidence < 0.72:
+            confidence_too_low = confidence_gate and confidence < confidence_threshold
+            if action not in ("warn", "mute") or confidence_too_low:
                 return
             valid_violation_types = ("spam", "abuse", "ad", "sexual", "illegal", "conflict")
             if violation_type not in valid_violation_types:
@@ -1225,15 +1325,14 @@ class GroupAdminPlugin(MaiBotPlugin):
                 return
             if violation_type == "conflict":
                 violation_type = "abuse"
-            if is_image_audit and violation_type in ("sexual", "illegal", "ad", "abuse"):
-                recall_message = True
             if action == "warn":
                 result = await self.tool_warn_user(group_id=group_id, user_id=user_id, violation_type=violation_type, reason=reason)
                 content = str(result.get("content", "")) if isinstance(result, dict) else ""
                 if content.startswith("已向"):
-                    if recall_message:
+                    if recall_message and self.config.auto_moderate.auto_recall:
                         await self._maybe_recall_audited_message(group_id, message_id, reason)
-                    await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
+                    if self.config.auto_moderate.trigger_moderation_reply:
+                        await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
                 return
             duration = self._to_int(verdict.get("duration", 0))
             if duration <= 0:
@@ -1246,9 +1345,10 @@ class GroupAdminPlugin(MaiBotPlugin):
             result = await self.tool_mute_user(group_id=group_id, user_id=user_id, duration=duration, reason=reason)
             content = str(result.get("content", "")) if isinstance(result, dict) else ""
             if content.startswith("已将"):
-                if recall_message:
+                if recall_message and self.config.auto_moderate.auto_recall:
                     await self._maybe_recall_audited_message(group_id, message_id, reason)
-                await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
+                if self.config.auto_moderate.trigger_moderation_reply:
+                    await self._trigger_native_moderation_reply(stream_id, group_id, action, violation_type, reason)
         except Exception as e:
             self.ctx.logger.error(f"[群管理] 入站LLM审核异常: {e}", exc_info=True)
         finally:
@@ -1542,6 +1642,104 @@ class GroupAdminPlugin(MaiBotPlugin):
         if suffix:
             segments.append({"type": "text", "content": suffix})
         await self.ctx.send.hybrid(segments, stream_id)
+
+    async def _remember_recent_group_manager_speaker(self, group_id: int, user_id: int, bot_id: int = 0) -> None:
+        if group_id <= 0 or user_id <= 0 or (bot_id and user_id == bot_id):
+            return
+        role = await self._check_target_role(group_id, user_id)
+        if role not in ("owner", "admin"):
+            return
+        speakers = self._recent_group_managers.setdefault(group_id, deque(maxlen=12))
+        speakers.append((time.time(), user_id, role))
+
+    def _find_recent_group_manager_for_notice(self, group_id: int, exclude_user_id: int = 0, bot_id: int = 0) -> int:
+        speakers = self._recent_group_managers.get(group_id)
+        if not speakers:
+            return 0
+        for item in reversed(speakers):
+            uid = item[1]
+            if uid > 0 and uid != exclude_user_id and (not bot_id or uid != bot_id):
+                return uid
+        return 0
+
+    async def _find_group_owner_for_notice(self, group_id: int, bot_id: int = 0) -> int:
+        if group_id <= 0:
+            return 0
+        try:
+            ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_list", group_id=group_id)
+            members = data
+            if isinstance(data, dict):
+                members = data.get("data") or data.get("members") or data.get("list") or []
+            if ok and isinstance(members, list):
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    if str(member.get("role", "")).strip().lower() != "owner":
+                        continue
+                    owner_id = self._to_int(
+                        member.get("user_id")
+                        or member.get("userId")
+                        or member.get("qq")
+                        or member.get("uin")
+                    )
+                    if owner_id > 0 and (not bot_id or owner_id != bot_id):
+                        self._known_roles[(group_id, owner_id)] = ("owner", time.time())
+                        return owner_id
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 查询群主失败: group={group_id}: {e}")
+        return 0
+
+    async def _generate_image_unknown_notice(self, unreadable_count: int) -> str:
+        fallback = f" 有{unreadable_count}张图片没有完成识别，麻烦人工看一下要不要处理。"
+        if not getattr(self.config.auto_moderate, "image_unknown_notice_use_llm", False):
+            return fallback
+        prompt = (
+            "你是QQ群里的群管理助手，需要写一句很短的中文提示给群主或管理员。"
+            "场景：有图片描述为空或超时，自动审核无法确认图片内容，需要群主或管理员人工查看。"
+            "要求：自然、简短、不要说已经违规、不要要求撤回、不要包含@、不要解释技术细节。"
+            f"未完成识别的图片数量：{unreadable_count}\n"
+            "只输出一句话。"
+        )
+        try:
+            result = await self.ctx.llm.generate(prompt=prompt, model="replyer", temperature=0.5, max_tokens=60)
+            if isinstance(result, dict) and result.get("success"):
+                text = str(result.get("response", "")).strip()
+                text = re.sub(r"^```.*?```$", "", text, flags=re.S).strip()
+                text = text.strip('"').strip("'").strip("“”「」")
+                text = re.sub(r"@\S+", "", text).strip()
+                if text:
+                    return " " + text[:120]
+        except Exception as e:
+            self.ctx.logger.warning(f"[群管理] 生成图片未知风险通知失败: {e}")
+        return fallback
+
+    async def _notify_group_manager_for_image_unknown(
+        self,
+        group_id: int,
+        user_id: int,
+        stream_id: str,
+        message_id: str,
+        unreadable_count: int,
+    ) -> bool:
+        bot_id = self._to_int(self.config.identity.bot_qq) or self._bot_self_id or 0
+        manager_id = self._find_recent_group_manager_for_notice(group_id, exclude_user_id=user_id, bot_id=bot_id)
+        if not manager_id:
+            manager_id = await self._find_group_owner_for_notice(group_id, bot_id=bot_id)
+        if not manager_id:
+            if self.config.logging.verbose_logging:
+                self.ctx.logger.info(
+                    f"[群管理] 图片未知风险未通知: 未找到最近发言的群主或管理员，也未找到群主 "
+                    f"group={group_id} user={user_id} mid={message_id}"
+                )
+            return False
+        suffix = await self._generate_image_unknown_notice(unreadable_count)
+        await self._send_at_text(stream_id, "", manager_id, suffix)
+        if self.config.logging.verbose_logging:
+            self.ctx.logger.info(
+                f"[群管理] 图片未知风险已通知群主或管理员: group={group_id} user={user_id} manager={manager_id} "
+                f"mid={message_id} unreadable={unreadable_count}"
+            )
+        return True
 
     def _extract_sender_id(self, kwargs: dict[str, Any]) -> int:
         for key in ("user_id", "sender_id", "user"):
@@ -2234,6 +2432,7 @@ class GroupAdminPlugin(MaiBotPlugin):
         self._get_member_called.clear()
         self._last_mute_time.clear()
         self._recent_user_messages.clear()
+        self._recent_group_managers.clear()
         for task in list(self._audit_tasks.values()):
             if task and not task.done():
                 task.cancel()
@@ -2460,6 +2659,7 @@ class GroupAdminPlugin(MaiBotPlugin):
                 f"images={len(image_segments)} forwarded_record={forwarded_record_single_message} stream={stream_id}"
             )
         bot_id = self._to_int(self.config.identity.bot_qq) or self._bot_self_id or 0
+        await self._remember_recent_group_manager_speaker(group_id, sender_id, bot_id)
         if sender_id and sender_id != bot_id:
             msg_id = str(message.get("message_id", "")) if isinstance(message, dict) else ""
             self._schedule_llm_moderation(
@@ -2532,6 +2732,7 @@ class GroupAdminPlugin(MaiBotPlugin):
                     f"text_len={len(text)} images={len(image_segments)} "
                     f"forwarded_record={forwarded_record_single_message} msg_id={msg_id} stream={stream_for_reply}"
                 )
+            await self._remember_recent_group_manager_speaker(group_id, sender_id, bot_id)
             if sender_id and sender_id != bot_id:
                 self._schedule_llm_moderation(
                     group_id,
