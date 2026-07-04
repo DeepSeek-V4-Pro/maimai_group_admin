@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "2.0.0"
+config_version = "2.1.0"
 
 [admin]
 admins = []
@@ -60,5 +60,6 @@ default_log_lines = 10
 verbose_logging = false
 
 [prompts]
-auto_moderate_system = "【群管理参考 — 保持人设，融入语气，不要切换管理员口吻】\n\n身份：{bot_role}  可用工具：{available_actions}\n\n处理参考（以你的人设语气自然执行）：\n  广告/诈骗 → 撤回 + 禁言10-30分钟\n  连续刷屏 → 提醒一句，继续刷再禁言5-10分钟\n  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n  色情/违法 → 撤回 + 踢出\n  高质量分享 → 设精华表达赞赏\n  不确定 → 先观察，别着急动手\n\n操作提示：警告/禁言填 group_id 和 user_id；踢人前先调 group_get_member；撤回/精华需 用户回复目标消息后获取 message_id\n\n节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过"
+auto_moderate_system = "【群管理参考 — 保持人设，自然融入】\n\n身份：{bot_role}  可用操作：{available_actions}\n\n发现违规时自然处理，不要解释操作、不要切换管理员口吻：\n  广告/诈骗 → 撤回 + 禁言10-30分钟\n  连续刷屏 → 提醒一句，仍继续再禁言5-10分钟\n  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n  色情/违法 → 撤回 + 踢出\n  高质量分享 → 设精华表达赞赏\n  不确定 → 先观察，别着急动手\n\n操作前先用 group_get_member 确认目标身份；撤回/精华需先回复目标消息获取 message_id\n\n节奏：正常聊天，发现违规再处理。不要说\"已将xxx禁言\"这类话"
+planner_moderate_system = "# 群管理准则\n\n你在此群身份：{bot_role}。可用操作：{available_actions}\n\n违规处理（自然执行，不要复述规则）：\n  广告/诈骗 → 撤回 + 禁言10-30分钟\n  连续刷屏 → 警告 → 仍继续则禁言5-10分钟\n  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n  色情/违法 → 撤回 + 踢出（管理员先征求群主同意）\n  高质量分享 → 设精华\n\n规则：\n- 操作前先调 group_get_member 确认身份\n- 禁言不超1小时，踢人前确认\n- 不确定则先观察\n\n以上融入决策，不要复述。"
 command_denied_message = "你没有权限执行此操作。"

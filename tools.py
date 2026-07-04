@@ -17,7 +17,7 @@ class ToolMixin:
     # Tool: group_warn_user
     # =========================================================================
 
-    @Tool("group_warn_user", description="向群成员发出正式警告并记录违规类型(spam/abuse/ad)", parameters=[
+    @Tool("group_warn_user", description="向群成员发出正式警告并记录违规类型(spam/abuse/ad)（管理员/群主可用）", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
         ToolParameterInfo(name="violation_type", param_type=ToolParamType.STRING, description="违规类型: spam(刷屏)/abuse(辱骂)/ad(广告)", required=True),
@@ -122,7 +122,7 @@ class ToolMixin:
     # Tool: group_kick_user
     # =========================================================================
 
-    @Tool("group_kick_user", description="踢出指定群成员（群主可直接踢；管理员需先征求群主同意后使用），踢人前先调 group_get_member 确认身份", parameters=[
+    @Tool("group_kick_user", description="踢出指定群成员（管理员需在严重违规请示群主或群主要求时使用），踢人前先调 group_get_member 确认身份", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="踢出原因", required=True),
@@ -137,10 +137,8 @@ class ToolMixin:
         async with self._lock:
             await self._check_daily_reset(group_id)
             bot_role = self._get_group_role(group_id)
-            if bot_role == "admin":
-                return {"name": "group_kick_user", "content": "你是管理员而非群主，踢人前请先在群里征求群主或管理员的同意"}
-            if bot_role not in ("owner",):
-                return {"name": "group_kick_user", "content": "权限不足，仅群主可以踢人"}
+            if bot_role not in ("owner", "admin"):
+                return {"name": "group_kick_user", "content": "权限不足，仅群主和管理员可以踢人"}
             is_protected, msg = await self._is_protected(group_id, user_id)
             if is_protected: return {"name": "group_kick_user", "content": f"无法踢出: {msg}"}
             esc = self._check_escalation(group_id, user_id)
@@ -170,7 +168,7 @@ class ToolMixin:
     # Tool: group_set_user_card
     # =========================================================================
 
-    @Tool("group_set_user_card", description="修改指定群成员的群名片", parameters=[
+    @Tool("group_set_user_card", description="修改指定群成员的群名片（管理员/群主可用）", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
         ToolParameterInfo(name="card", param_type=ToolParamType.STRING, description="新群名片", required=True),
@@ -247,7 +245,7 @@ class ToolMixin:
     # Tool: group_approve_join
     # =========================================================================
 
-    @Tool("group_approve_join", description="通过入群申请，request_id 从 group_get_system_msg 获取", parameters=[
+    @Tool("group_approve_join", description="通过入群申请（管理员/群主可用），request_id 从 group_get_system_msg 获取", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="request_id", param_type=ToolParamType.STRING, description="申请ID (来自 group_get_system_msg)", required=True),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="通过原因(可选)", required=False),
@@ -277,7 +275,7 @@ class ToolMixin:
     # Tool: group_reject_join
     # =========================================================================
 
-    @Tool("group_reject_join", description="拒绝入群申请，request_id 从 group_get_system_msg 获取", parameters=[
+    @Tool("group_reject_join", description="拒绝入群申请（管理员/群主可用），request_id 从 group_get_system_msg 获取", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="request_id", param_type=ToolParamType.STRING, description="申请ID (来自 group_get_system_msg)", required=True),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="拒绝原因", required=True),
@@ -309,7 +307,7 @@ class ToolMixin:
     #       group_get_shut_list / group_get_notice / group_get_system_msg
     # =========================================================================
 
-    @Tool("group_post_notice", description="发布群公告（仅群主），返回 notice_id 供后续删除", parameters=[
+    @Tool("group_post_notice", description="发布群公告（管理员/群主可用），返回 notice_id 供后续删除", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="content", param_type=ToolParamType.STRING, description="公告内容", required=True),
     ])
@@ -336,7 +334,7 @@ class ToolMixin:
                 self.ctx.logger.error(f"[群管理] Tool-notice-post 异常: group={group_id}", exc_info=True)
                 return {"name": "group_post_notice", "content": "发布公告未能生效，请稍后重试"}
 
-    @Tool("group_delete_notice", description="删除群公告（仅群主），notice_id 从 group_get_notice 获取", parameters=[
+    @Tool("group_delete_notice", description="删除群公告（管理员/群主可用），notice_id 从 group_get_notice 获取", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="notice_id", param_type=ToolParamType.STRING, description="公告ID (来自 group_get_notice)", required=True),
     ])
@@ -355,7 +353,7 @@ class ToolMixin:
                 self.ctx.logger.error(f"[群管理] Tool-notice-del 异常: group={group_id}", exc_info=True)
                 return {"name": "group_delete_notice", "content": "删除公告未能生效，请稍后重试"}
 
-    @Tool("group_set_essence", description="将消息设为群精华，需用户回复目标消息后获取 message_id", parameters=[
+    @Tool("group_set_essence", description="将消息设为群精华（管理员/群主可用），需用户回复目标消息后获取 message_id", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="message_id", param_type=ToolParamType.STRING, description="消息ID (用户回复目标消息后提取)", required=True),
     ])
@@ -374,7 +372,7 @@ class ToolMixin:
                 self.ctx.logger.error(f"[群管理] Tool-essence-set 异常: group={group_id}", exc_info=True)
                 return {"name": "group_set_essence", "content": "设为精华未能生效，请稍后重试"}
 
-    @Tool("group_unset_essence", description="取消消息的精华状态，需用户回复目标消息后获取 message_id", parameters=[
+    @Tool("group_unset_essence", description="取消消息的精华状态（管理员/群主可用），需用户回复目标消息后获取 message_id", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="message_id", param_type=ToolParamType.STRING, description="消息ID (用户回复目标消息后提取)", required=True),
     ])
@@ -406,7 +404,7 @@ class ToolMixin:
         self.ctx.logger.info(f"[群管理] Tool-recall: group={group_id} mid={message_id}")
         async with self._lock:
             try:
-                ok, data = await self._call_api(api_name="adapter.napcat.message.delete_msg", message_id=self._to_int(message_id))
+                ok, data = await self._call_api(api_name="adapter.napcat.message.delete_msg", message_id=message_id)
                 if not ok: return {"name": "group_recall_msg", "content": f"撤回未能生效: {data}"}
                 return {"name": "group_recall_msg", "content": f"已撤回消息 {message_id}: {reason}"}
             except Exception:
@@ -437,7 +435,7 @@ class ToolMixin:
                 self.ctx.logger.error(f"[群管理] Tool-get-member 异常: group={group_id} user={user_id}", exc_info=True)
                 return {"name": "group_get_member", "content": "查询成员信息未能生效，请稍后重试"}
 
-    @Tool("group_get_shut_list", description="查看当前群被禁言的成员列表", parameters=[
+    @Tool("group_get_shut_list", description="查看当前群被禁言的成员列表（管理员/群主可用）", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
     ])
     async def tool_get_shut_list(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
@@ -474,7 +472,7 @@ class ToolMixin:
                 self.ctx.logger.error(f"[群管理] Tool-get-notice 异常: group={group_id}", exc_info=True)
                 return {"name": "group_get_notice", "content": "获取公告列表未能生效，请稍后重试"}
 
-    @Tool("group_get_system_msg", description="获取群的系统消息(含入群申请列表)", parameters=[
+    @Tool("group_get_system_msg", description="获取群的系统消息(含入群申请列表)（管理员/群主可用）", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
     ])
     async def tool_get_system_msg(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:

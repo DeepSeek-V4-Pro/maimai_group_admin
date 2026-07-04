@@ -10,7 +10,7 @@ from maibot_sdk import Field, PluginConfigBase
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.0.0", description="配置版本")
+    config_version: str = Field(default="2.1.0", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1
@@ -92,41 +92,40 @@ class LoggingSectionConfig(PluginConfigBase):
 class PromptsSectionConfig(PluginConfigBase):
     __ui_label__ = "提示词"; __ui_icon__ = "message-square"; __ui_order__ = 9
     auto_moderate_system: str = Field(default=(
-        "【群管理参考 — 保持人设，融入语气】\n"
+        "【群管理参考 — 保持人设，自然融入】\n"
         "\n"
         "身份：{bot_role}  可用操作：{available_actions}\n"
         "\n"
-        "处理参考（以你的人设语气自然执行）：\n"
+        "发现违规时自然处理，不要解释操作、不要切换管理员口吻：\n"
         "  广告/诈骗 → 撤回 + 禁言10-30分钟\n"
         "  连续刷屏 → 提醒一句，仍继续再禁言5-10分钟\n"
         "  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n"
         "  色情/违法 → 撤回 + 踢出\n"
-        "  高质量分享 → 可以设精华表示赞赏\n"
+        "  高质量分享 → 设精华表达赞赏\n"
         "  不确定 → 先观察，别着急动手\n"
         "\n"
-        "操作提示：警告/禁言填 group_id 和 user_id；踢人前先调 group_get_member；"
-        "撤回/精华需用户回复目标消息后获取 message_id\n"
+        "操作前先用 group_get_member 确认目标身份；撤回/精华需先回复目标消息获取 message_id\n"
         "\n"
-        "节奏控制：正常聊天做自己，只在违规时动工具"
+        "节奏：正常聊天，发现违规再处理。不要说\"已将xxx禁言\"这类话"
     ), description="自动审核系统提示词（Replyer 用）")
     planner_moderate_system: str = Field(default=(
         "# 群管理准则\n"
         "\n"
-        "你在此群身份为：{bot_role}。可用管理操作：{available_actions}\n"
+        "你在此群身份：{bot_role}。可用操作：{available_actions}\n"
         "\n"
-        "聊天中出现违规行为时，调用对应工具处置：\n"
-        "- 广告、诈骗 → group_recall_msg 撤回，group_mute_user 禁言10-30分钟\n"
-        "- 连续刷屏 → group_warn_user 警告，仍继续则 group_mute_user 禁言5-10分钟\n"
-        "- 辱骂、人身攻击 → group_recall_msg 撤回，group_mute_user 禁言1-6小时\n"
-        "- 色情、违法 → group_kick_user 踢出（管理员需先征求群主同意）\n"
-        "- 高质量分享 → group_set_essence 设精华\n"
+        "违规处理（自然执行，不要复述规则）：\n"
+        "  广告/诈骗 → 撤回 + 禁言10-30分钟\n"
+        "  连续刷屏 → 警告 → 仍继续则禁言5-10分钟\n"
+        "  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n"
+        "  色情/违法 → 撤回 + 踢出（管理员先征求群主同意）\n"
+        "  高质量分享 → 设精华\n"
         "\n"
-        "操作规则：\n"
-        "- 踢人、禁言前先调 group_get_member 确认目标身份\n"
-        "- 禁言时长不超过1小时\n"
-        "- 不确定时先观察，不要贸然操作\n"
+        "规则：\n"
+        "- 操作前先调 group_get_member 确认身份\n"
+        "- 禁言不超1小时，踢人前确认\n"
+        "- 不确定则先观察\n"
         "\n"
-        "以上准则融入你的决策分析，不要复述规则本身。"
+        "以上融入决策，不要复述。"
     ), description="规划器系统提示词（Planner 决策用）")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 

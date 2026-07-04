@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from collections import deque
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, ClassVar, Optional
+
+import tomlkit
 
 from maibot_sdk import MaiBotPlugin, PluginConfigBase
 
@@ -513,17 +517,20 @@ class PluginCore(MaiBotPlugin):
             if val: return self._to_int(val)
         return 0
 
-    async def _check_admin_permission(self, stream_id: str, group_id: int, kwargs: dict[str, Any]) -> bool:
-        sender_id = self._extract_sender_id(kwargs)
+    async def _check_admin_permission(self, stream_id: str, group_id: int, user_id: str | int = "", command_text: str = "") -> bool:
+        sender_str = str(self._to_int(user_id)) if user_id else ""
+        if not sender_str:
+            return False
         admins = self.config.admin.admins
         deny_mode = self.config.admin.deny_response
-        if str(sender_id) in admins: return True
+        if sender_str in admins:
+            return True
         if group_id <= 0:
             if deny_mode == "reply":
                 await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
             return False
         is_owner = False
-        role = await self._check_target_role(group_id, sender_id)
+        role = await self._check_target_role(group_id, self._to_int(sender_str))
         if role == "owner":
             is_owner = True
         if is_owner:
@@ -533,9 +540,8 @@ class PluginCore(MaiBotPlugin):
                 allowed = self.config.admin.owner_allowed_commands
                 if not allowed:
                     return True
-                text = str(kwargs.get("text", ""))
                 for cmd in allowed:
-                    if re.search(r'\b' + re.escape(cmd) + r'\b', text):
+                    if re.search(r'\b' + re.escape(cmd) + r'\b', command_text):
                         return True
                 if deny_mode == "reply":
                     await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
@@ -543,6 +549,26 @@ class PluginCore(MaiBotPlugin):
         if deny_mode == "reply":
             await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
         return False
+
+    async def _save_exempt_users(self):
+        try:
+            config_path = os.path.join(Path(__file__).parent, "config.toml")
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = tomlkit.load(f)
+            if "safeguard" not in config_data:
+                config_data["safeguard"] = tomlkit.table()
+            exempt_table = tomlkit.table()
+            for gid, users in self.config.safeguard.exempt_users.items():
+                arr = tomlkit.array()
+                for u in users:
+                    arr.append(u)
+                exempt_table[gid] = arr
+            config_data["safeguard"]["exempt_users"] = exempt_table
+            with open(config_path, "w", encoding="utf-8") as f:
+                tomlkit.dump(config_data, f)
+            self.ctx.logger.info("[群管理] 豁免名单已持久化到 config.toml")
+        except Exception as e:
+            self.ctx.logger.error(f"[群管理] 持久化豁免名单失败: {e}", exc_info=True)
 
     def _clear_runtime_cache(self):
         self._group_roles.clear()

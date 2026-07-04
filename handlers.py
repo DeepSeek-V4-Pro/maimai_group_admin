@@ -16,9 +16,9 @@ class HandlerMixin:
 
     _ROLE_CN: dict[str, str] = {"owner": "群主", "admin": "管理员", "member": "普通成员"}
     _ACTIONS_BY_ROLE: dict[str, str] = {
-        "owner": "禁言/解禁/警告/设精华/撤回/公告/改名/审批入群/踢人",
-        "admin": "禁言/解禁/警告/设精华/撤回/改名片/审批入群/踢人",
-        "member": "管理操作受限，可协助管理员做决策建议",
+        "owner": "禁言/解禁/警告/设精华/撤回/改名片/公告/改名/审批入群/踢人",
+        "admin": "禁言/解禁/警告/设精华/撤回/改名片/公告/审批入群/踢人",
+        "member": "无管理操作权限，可协助管理员做决策建议",
     }
 
     # ===== Prompt 构建 =====
@@ -131,15 +131,12 @@ class HandlerMixin:
     async def _prepare_injection(self, **kwargs: Any) -> tuple[int, str, str] | None:
         if not self.config.plugin.enabled or not self.config.auto_moderate.enabled:
             return None
-        enabled = {int(g) for g in self.config.auto_moderate.enabled_groups if g}
-        if not enabled:
-            return None
         group_id = 0
         for key in ("reply_message_id", "session_id", "stream_id", "chat_id"):
             sid = str(kwargs.get(key, ""))
             if sid:
                 gid = self._stream_to_group.get(sid, 0)
-                if gid in enabled:
+                if gid and self._is_group_enabled(gid):
                     group_id = gid
                     break
         if self.config.logging.verbose_logging:
@@ -203,11 +200,13 @@ class HandlerMixin:
                 if self.PROMPT_MARKER not in content:
                     content = f"{content.rstrip()}\n\n{prompt}" if content.strip() else prompt
                     message["content"] = content
-                    message["content_text"] = content
+                    if "content_text" in message:
+                        message["content_text"] = content
                 inserted = True
             updated.append(message)
         if not inserted:
-            updated.insert(0, {"role": "system", "content": prompt, "content_text": prompt})
+            msg: dict[str, str] = {"role": "system", "content": prompt}
+            updated.insert(0, msg)
         self.ctx.logger.debug("[群管理] before_model_request 注入 messages: group=%s role=%s", group_id, role)
         return {"action": "continue", "modified_kwargs": {"messages": updated}}
 
@@ -236,15 +235,12 @@ class HandlerMixin:
     async def inject_admin_planner_prompt(self, **kwargs: Any):
         if not self.config.plugin.enabled or not self.config.auto_moderate.enabled:
             return {"action": "continue"}
-        enabled = {int(g) for g in self.config.auto_moderate.enabled_groups if g}
-        if not enabled:
-            return {"action": "continue"}
         group_id = 0
         for key in ("reply_message_id", "session_id", "stream_id", "chat_id"):
             sid = str(kwargs.get(key, ""))
             if sid:
                 gid = self._stream_to_group.get(sid, 0)
-                if gid in enabled:
+                if gid and self._is_group_enabled(gid):
                     group_id = gid
                     break
         if self.config.logging.verbose_logging:
