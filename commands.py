@@ -76,7 +76,10 @@ class CommandMixin:
         qq = int(matched.get("qq", 0))
         if not qq: await self._send_persona_text(stream_id, "用法: /admin undo [群号] @qq", "usage_hint", "缺少目标QQ，提示 /admin undo 用法"); return True, "", True
         if not await self._check_admin_permission(stream_id, gid, kwargs): return True, "", True
-        await self._call_api(api_name="adapter.napcat.group.set_group_ban", group_id=gid, user_id=qq, duration=0)
+        ok, _ = await self._call_api(api_name="adapter.napcat.group.set_group_ban", group_id=gid, user_id=qq, duration=0)
+        if not ok:
+            await self._send_persona_text(stream_id, "强制解禁未能生效，请检查权限", "command_failure", "强制解禁未能生效，请检查权限")
+            return True, "", True
         exempt = self.config.safeguard.exempt_users
         gid_str = str(gid)
         if gid_str in exempt and str(qq) in exempt[gid_str]:

@@ -1620,10 +1620,12 @@ class PluginCore(MaiBotPlugin):
         if not self.config.escalation.enabled: return None
         steps = self.config.escalation.escalation_steps
         if not steps: return None
+        matched: Optional[EscalationStepConfig] = None
         for step in steps:
             if self._count_ops_in_window(group_id, user_id, float(step.within_hours)) + max(0, pending_count) >= int(step.count):
-                return step
-        return None
+                if matched is None or int(step.count) > int(matched.count):
+                    matched = step
+        return matched
 
     def _check_warning_threshold(self, group_id: int, user_id: int, violation_type: str) -> tuple[bool, int, int]:
         wc = self.config.warning
