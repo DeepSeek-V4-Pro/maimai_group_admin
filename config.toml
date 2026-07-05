@@ -18,6 +18,23 @@ bot_qq = ""
 [auto_moderate]
 enabled = true
 enabled_groups = []
+audit_model = "planner"
+audit_max_tokens = 220
+audit_confidence_gate = true
+audit_confidence_threshold = 0.72
+audit_images = true
+image_audit_max_images = 4
+forwarded_image_audit_max_images = 8
+image_description_timeout = 12.0
+image_unknown_policy = "none"
+retry_unrecognized_media_with_image_audit = true
+image_unknown_notify_owner = true
+persona_managed_comments_enabled = false
+persona_managed_comments_model = "replyer"
+expand_forwarded_records = true
+treat_forwarded_records_as_single_message = true
+auto_recall = false
+trigger_moderation_reply = true
 
 [safeguard]
 max_mute_duration = 3600
@@ -32,6 +49,7 @@ auto_exempt_admins = true
 
 [warning]
 enabled = true
+warning_reply_prefix = "⚠️"
 spam_warn_threshold = 3
 spam_warn_window = 600
 abuse_warn_threshold = 1
@@ -60,5 +78,7 @@ default_log_lines = 10
 verbose_logging = false
 
 [prompts]
-auto_moderate_system = "【群管理参考 — 保持人设，融入语气，不要切换管理员口吻】\n\n身份：{bot_role}  可用工具：{available_actions}\n\n处理参考（以你的人设语气自然执行）：\n  广告/诈骗 → 撤回 + 禁言10-30分钟\n  连续刷屏 → 提醒一句，继续刷再禁言5-10分钟\n  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n  色情/违法 → 撤回 + 踢出\n  高质量分享 → 设精华表达赞赏\n  不确定 → 先观察，别着急动手\n\n操作提示：警告/禁言填 group_id 和 user_id；踢人前先调 group_get_member；撤回/精华需 用户回复目标消息后获取 message_id\n\n节奏控制：正常聊天做自己，只在违规时动工具，不要说'已将xxx禁言'，用自然方式带过"
+auto_moderate_system = "【群管理参考 — 保持人设，融入语气】\n\n身份：{bot_role}  可用操作：{available_actions}\n\n处理参考（以你的人设语气自然执行）：\n  广告/诈骗 → 撤回 + 禁言10-30分钟\n  连续刷屏 → 提醒一句，仍继续再禁言5-10分钟\n  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n  色情/违法 → 撤回 + 踢出\n  高质量分享 → 可以设精华表示赞赏\n  不确定 → 先观察，别着急动手\n\n操作提示：警告/禁言填 group_id 和 user_id；踢人前先调 group_get_member；撤回/精华需用户回复目标消息后获取 message_id\n\n节奏控制：正常聊天做自己，只在违规时动工具"
+planner_moderate_system = "# 群管理准则\n\n你在此群身份为：{bot_role}。可用管理操作：{available_actions}\n\n聊天中出现违规行为时，调用对应工具处置：\n- 广告、诈骗 → group_recall_msg 撤回，group_mute_user 禁言10-30分钟\n- 连续刷屏 → group_warn_user 警告，仍继续则 group_mute_user 禁言5-10分钟\n- 辱骂、人身攻击 → group_recall_msg 撤回，group_mute_user 禁言1-6小时\n- 色情、违法 → group_kick_user 踢出（管理员需先征求群主同意）\n- 高质量分享 → group_set_essence 设精华\n\n操作规则：\n- 踢人、禁言前先调 group_get_member 确认目标身份\n- 禁言时长不超过1小时\n- 不确定时先观察，不要贸然操作\n\n以上准则融入你的决策分析，不要复述规则本身。"
+image_unknown_notice_prompt = "{bot_style_context}\n\n请用当前人设和表达风格，写一句很短的中文群聊发言，呼叫群主或管理员人工查看。\n场景：有{unreadable_kind_detail}描述为空或超时，自动审核无法确认{unreadable_kind}内容。\n要求：自然、简短、像群里正常说话；不要说已经违规；不要要求撤回；不要包含@；不要解释技术细节；不要输出括号说明；不要表达出你看不到图片或表情包，也不要表达出你看到了图片或表情包内容。\n只输出一句话。"
 command_denied_message = "你没有权限执行此操作。"
