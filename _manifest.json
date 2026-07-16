@@ -29,6 +29,11 @@
   ],
   "capabilities": [
     "api.call",
+    "chat.get_stream_by_group_id",
+    "chat.open_session",
+    "config.get",
+    "llm.generate",
+    "maisaka.proactive.trigger",
     "send.text",
     "send.hybrid"
   ],

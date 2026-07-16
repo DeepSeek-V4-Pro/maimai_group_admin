@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
+from pydantic import model_validator
 from maibot_sdk import Field, PluginConfigBase
 
 
@@ -27,12 +28,37 @@ class IdentitySectionConfig(PluginConfigBase):
     override_roles: dict[str, str] = Field(default_factory=dict, description="手动覆盖指定群的bot角色")
 
 class AutoModerateSectionConfig(PluginConfigBase):
-    __ui_label__ = "自动审核"; __ui_icon__ = "zap"; __ui_order__ = 3
+    __ui_label__ = "基础与文本审核"; __ui_icon__ = "zap"; __ui_order__ = 3
     enabled: bool = Field(default=True, description="是否启用自动审核")
     enabled_groups: list[str] = Field(default_factory=list, description="启用插件的群号白名单")
+    audit_model: Literal["planner", "utils", "replyer"] = Field(default="planner", description="入站LLM审核使用的任务模型: planner/utils/replyer")
+    audit_max_tokens: int = Field(default=220, description="入站LLM审核最大输出token数")
+    audit_confidence_gate: bool = Field(default=True, description="是否启用入站审核置信度门槛")
+    audit_confidence_threshold: float = Field(default=0.72, description="入站审核执行warn/mute的最低置信度")
+
+class MediaAuditSectionConfig(PluginConfigBase):
+    __ui_label__ = "图片与表情审核"; __ui_icon__ = "image"; __ui_order__ = 4
+    audit_regular_images: bool = Field(default=True, description="是否审核普通图片消息")
+    audit_emojis: bool = Field(default=True, description="是否审核表情包消息")
+    media_audit_max_items: int = Field(default=4, description="单条消息最多审核的图片/表情数量")
+    forwarded_media_audit_max_items: int = Field(default=8, description="合并转发展开后最多审核的图片/表情数量")
+    media_description_timeout: float = Field(default=12.0, description="单个图片/表情等待描述生成的最长秒数")
+    violation_media_policy: Literal["none", "warn", "notify"] = Field(default="none", description="违规图片/表情处理策略: none/warn/notify")
+    violation_media_notify_target: str = Field(default="admin_or_owner", description="违规图片/表情人工复核通知对象: admin/owner/admin_or_owner/QQ号")
+    retry_violation_media_with_image_audit: bool = Field(default=True, description="主程序未通过审核的图片/表情，是否读取原图再推送识图复查")
+    violation_media_text_judge_enabled: bool = Field(default=True, description="是否用大模型判断识图返回文本是否表示模型明确拒绝识图")
+    notify_on_media_description_failure: bool = Field(default=False, description="图片/表情识图失败、超时、空返回、无法判断内容时是否也通知人工复核")
+
+class ModerationBehaviorSectionConfig(PluginConfigBase):
+    __ui_label__ = "处置与评论"; __ui_icon__ = "message-circle"; __ui_order__ = 5
+    persona_managed_comments_enabled: bool = Field(default=False, description="是否用主程序人设和表达风格生成管理评论/提示")
+    persona_managed_comments_model: str = Field(default="replyer", description="人设化管理评论使用的模型任务名")
+    expand_forwarded_records: bool = Field(default=True, description="是否尝试展开QQ合并转发内容进行审核")
+    auto_recall: bool = Field(default=False, description="审核结论要求撤回时是否自动撤回原消息")
+    trigger_moderation_reply: bool = Field(default=True, description="处置成功后是否触发麦麦主动回复")
 
 class SafeguardSectionConfig(PluginConfigBase):
-    __ui_label__ = "安全管理"; __ui_icon__ = "shield-off"; __ui_order__ = 4
+    __ui_label__ = "安全管理"; __ui_icon__ = "shield-off"; __ui_order__ = 6
     max_mute_duration: int = Field(default=3600, description="最大禁言秒数")
     kick_require_confirm: bool = Field(default=True, description="踢人前LLM必须先调用group_get_member")
     mute_cooldown: int = Field(default=300, description="同用户禁言最小间隔秒")
@@ -43,10 +69,12 @@ class SafeguardSectionConfig(PluginConfigBase):
     auto_exempt_admins: bool = Field(default=True, description="自动豁免群主/管理员")
 
 class WarningSectionConfig(PluginConfigBase):
-    __ui_label__ = "警告系统"; __ui_icon__ = "alert-triangle"; __ui_order__ = 5
+    __ui_label__ = "警告系统"; __ui_icon__ = "alert-triangle"; __ui_order__ = 7
     enabled: bool = Field(default=True, description="是否启用警告系统")
+    warning_reply_prefix: str = Field(default="⚠️", description="每条警告回复前固定加入的内容，留空则不添加")
     spam_warn_threshold: int = Field(default=3, description="刷屏警告阈值")
     spam_warn_window: int = Field(default=600, description="刷屏计数窗口(秒)")
+    treat_forwarded_records_as_single_message: bool = Field(default=True, description="合并转发在刷屏计数中按单条消息处理")
     abuse_warn_threshold: int = Field(default=1, description="辱骂警告阈值")
     abuse_warn_window: int = Field(default=3600, description="辱骂计数窗口(秒)")
     ad_warn_threshold: int = Field(default=1, description="广告警告阈值")
@@ -59,7 +87,7 @@ class EscalationStepConfig(PluginConfigBase):
     max_duration: int = Field(default=600, description="最大禁言秒数(仅mute时有效)")
 
 class EscalationSectionConfig(PluginConfigBase):
-    __ui_label__ = "处罚阶梯"; __ui_icon__ = "trending-up"; __ui_order__ = 6
+    __ui_label__ = "处罚阶梯"; __ui_icon__ = "trending-up"; __ui_order__ = 8
     enabled: bool = Field(default=True, description="是否启用处罚阶梯")
     escalation_steps: list[EscalationStepConfig] = Field(default_factory=list, description="处罚阶梯列表")
 
@@ -72,7 +100,7 @@ class GroupApproveOverrideConfig(PluginConfigBase):
     daily_reject_limit: int = Field(default=0, description="每日自动拒绝上限(0=使用全局)")
 
 class AutoApproveSectionConfig(PluginConfigBase):
-    __ui_label__ = "自动审批入群"; __ui_icon__ = "user-plus"; __ui_order__ = 7
+    __ui_label__ = "自动审批入群"; __ui_icon__ = "user-plus"; __ui_order__ = 9
     enabled: bool = Field(default=False, description="是否启用自动审批")
     default_action: str = Field(default="ignore", description="默认动作: ignore/approve/reject")
     require_message_keywords: list[str] = Field(default_factory=list, description="必须包含的关键词")
@@ -84,13 +112,13 @@ class AutoApproveSectionConfig(PluginConfigBase):
     groups: list[GroupApproveOverrideConfig] = Field(default_factory=list, description="按群覆盖设置(数组)")
 
 class LoggingSectionConfig(PluginConfigBase):
-    __ui_label__ = "日志与记录"; __ui_icon__ = "file-text"; __ui_order__ = 8
+    __ui_label__ = "日志与记录"; __ui_icon__ = "file-text"; __ui_order__ = 10
     max_log_entries: int = Field(default=2000, description="操作日志最大条数")
     default_log_lines: int = Field(default=10, description="/admin log 默认行数")
     verbose_logging: bool = Field(default=False, description="详细日志: 输出完整注入prompt和守门详情，用于排查问题")
 
 class PromptsSectionConfig(PluginConfigBase):
-    __ui_label__ = "提示词"; __ui_icon__ = "message-square"; __ui_order__ = 9
+    __ui_label__ = "提示词"; __ui_icon__ = "message-square"; __ui_order__ = 11
     auto_moderate_system: str = Field(default=(
         "【群管理参考 — 保持人设，自然融入】\n"
         "\n"
@@ -127,13 +155,64 @@ class PromptsSectionConfig(PluginConfigBase):
         "\n"
         "以上融入决策，不要复述。"
     ), description="规划器系统提示词（Planner 决策用）")
+    violation_media_notice_prompt: str = Field(default=(
+        "{bot_style_context}\n\n"
+        "请用当前人设和表达风格，写一句很短的中文群聊发言，呼叫人工查看。\n"
+        "场景：有{review_required_kind_detail}被主程序或模型判断为需要人工复核，自动审核无法确认{review_required_kind}内容是否违规。\n"
+        "要求：自然、简短、像群里正常说话；不要说已经违规；不要要求撤回；不要包含@；"
+        "不要解释技术细节；不要输出括号说明；不要表达出你看不到图片或表情包，"
+        "也不要表达出你看到了图片或表情包内容。\n"
+        "只输出一句话。"
+    ), description="违规图片/表情需要人工复核时，LLM生成呼叫人工提示的提示词")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 
 class GroupAdminConfig(PluginConfigBase):
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_auto_moderate_split(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        auto = data.get("auto_moderate")
+        if not isinstance(auto, dict):
+            return data
+
+        media_keys = (
+            "audit_regular_images",
+            "audit_emojis",
+            "media_audit_max_items",
+            "forwarded_media_audit_max_items",
+            "media_description_timeout",
+            "violation_media_policy",
+            "violation_media_notify_target",
+            "retry_violation_media_with_image_audit",
+            "violation_media_text_judge_enabled",
+            "notify_on_media_description_failure",
+        )
+        behavior_keys = (
+            "persona_managed_comments_enabled",
+            "persona_managed_comments_model",
+            "expand_forwarded_records",
+            "auto_recall",
+            "trigger_moderation_reply",
+        )
+        media = data.setdefault("media_audit", {})
+        behavior = data.setdefault("moderation_behavior", {})
+        if isinstance(media, dict):
+            for key in media_keys:
+                if key in auto and key not in media:
+                    media[key] = auto[key]
+        if isinstance(behavior, dict):
+            for key in behavior_keys:
+                if key in auto and key not in behavior:
+                    behavior[key] = auto[key]
+        return data
+
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     admin: AdminSectionConfig = Field(default_factory=AdminSectionConfig)
     identity: IdentitySectionConfig = Field(default_factory=IdentitySectionConfig)
     auto_moderate: AutoModerateSectionConfig = Field(default_factory=AutoModerateSectionConfig)
+    media_audit: MediaAuditSectionConfig = Field(default_factory=MediaAuditSectionConfig)
+    moderation_behavior: ModerationBehaviorSectionConfig = Field(default_factory=ModerationBehaviorSectionConfig)
     safeguard: SafeguardSectionConfig = Field(default_factory=SafeguardSectionConfig)
     warning: WarningSectionConfig = Field(default_factory=WarningSectionConfig)
     escalation: EscalationSectionConfig = Field(default_factory=EscalationSectionConfig)
