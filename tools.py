@@ -22,7 +22,7 @@ class ToolMixin:
     # Tool: group_warn_user
     # =========================================================================
 
-    @Tool("group_warn_user", description="向群成员发出正式警告并记录违规类型(spam/abuse/ad/sexual/illegal)", parameters=[
+    @Tool("group_warn_user", description="向群成员发出正式警告并记录违规类型(spam/abuse/ad/sexual/illegal)（管理员/群主可用）", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
         ToolParameterInfo(name="violation_type", param_type=ToolParamType.STRING, description="违规类型: spam(刷屏)/abuse(辱骂)/ad(广告)/sexual(色情低俗)/illegal(违法风险)", required=True),

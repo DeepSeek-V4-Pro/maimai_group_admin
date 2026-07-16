@@ -101,6 +101,7 @@ class CommandMixin:
         if gid_str in exempt and str(qq) in exempt[gid_str]:
             exempt[gid_str] = [u for u in exempt[gid_str] if u != str(qq)]
             if not exempt[gid_str]: del exempt[gid_str]
+            await self._save_exempt_users()
         await self._send_persona_at_text(stream_id, "已强制解禁", qq, "，同时移出豁免名单", "command_success", f"已强制解禁 {qq}，同时移出豁免名单")
         return True, "", True
 
@@ -118,7 +119,7 @@ class CommandMixin:
         entries = list(self._op_log)
         if gid: entries = [e for e in entries if e["group_id"] == gid]
         entries = entries[-n:]
-        if not entries: await self._send_persona_text(stream_id, "暂无操作记录", "command_success", "暂无操作记录"); return True, "", True
+        if not entries: await self.ctx.send.text("暂无操作记录", stream_id); return True, "", True
         lines = [f"群 {gid or '全部'} 最近 {len(entries)} 条操作记录:"]
         for e in entries:
             status = "o" if e["success"] else "x"
@@ -142,7 +143,9 @@ class CommandMixin:
         if not await self._check_admin_permission(stream_id, gid, user_id, command_text): return True, "", True
         exempt = self.config.safeguard.exempt_users
         gid_str = str(gid); exempt.setdefault(gid_str, [])
-        if str(qq) not in exempt[gid_str]: exempt[gid_str].append(str(qq))
+        if str(qq) not in exempt[gid_str]:
+            exempt[gid_str].append(str(qq))
+            await self._save_exempt_users()
         await self._send_persona_text(stream_id, f"已将 {qq} 添加到群 {gid} 的豁免名单", "command_success", f"已将 {qq} 添加到群 {gid} 的豁免名单")
         return True, "", True
 
@@ -164,6 +167,7 @@ class CommandMixin:
         if gid_str in exempt and str(qq) in exempt[gid_str]:
             exempt[gid_str] = [u for u in exempt[gid_str] if u != str(qq)]
             if not exempt[gid_str]: del exempt[gid_str]
+            await self._save_exempt_users()
         await self._send_persona_text(stream_id, f"已将 {qq} 从群 {gid} 的豁免名单移除", "command_success", f"已将 {qq} 从群 {gid} 的豁免名单移除")
         return True, "", True
 
@@ -171,7 +175,7 @@ class CommandMixin:
     async def cmd_admin_reload(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
         self.ctx.logger.info(f"[群管理] Cmd-reload: stream={stream_id}")
         admins = self.config.admin.admins
-        if str(sender_id) not in admins:
+        if str(user_id) not in admins:
             if self.config.admin.deny_response == "reply": await self._send_persona_text(stream_id, self.config.prompts.command_denied_message, "permission_denied", "管理员权限不足")
             return True, "", True
         try:
@@ -209,11 +213,11 @@ class CommandMixin:
         last_mute = self._last_mute_time.get(mute_key, 0)
         if sf.mute_cooldown > 0 and (time.time() - last_mute) < sf.mute_cooldown:
             remain = int(sf.mute_cooldown - (time.time() - last_mute))
-            await self._send_persona_text(stream_id, f"该用户 {remain} 秒前刚被禁言，请稍后再试", "command_failure", f"目标用户仍在禁言冷却中，剩余 {remain} 秒")
+            await self._send_persona_text(stream_id, f"该用户 {remain} 秒前刚被禁言，请稍后再试", "command_failure", f"该用户 {remain} 秒前刚被禁言，处于冷却中")
             return True, "", True
         esc = self._check_escalation(gid, qq)
         if esc and esc.action == "kick":
-            await self._send_persona_text(stream_id, f"该用户 {esc.within_hours}h 内已被处罚 {esc.count} 次，建议使用 /kick 踢出", "command_failure", f"目标用户已触发处罚阶梯，建议改用 /kick")
+            await self._send_persona_text(stream_id, f"该用户 {esc.within_hours}h 内已被处罚 {esc.count} 次，建议使用 /kick 踢出", "command_failure", f"处罚阶梯建议改用 /kick，用户 {qq} 暂不继续禁言")
             return True, "", True
         if esc and esc.action == "mute":
             duration = min(duration, esc.max_duration)
@@ -230,7 +234,7 @@ class CommandMixin:
             self._daily_mute_count[gid][today] += 1
             dur_min = duration // 60
             dur_str = f"{dur_min}分钟" if dur_min > 0 else f"{duration}秒"
-            await self._send_persona_at_text(stream_id, f"已将", qq, f"禁言 {dur_str}" + (f"（{reason}）" if reason else ""), "command_success", f"已将 {qq} 禁言 {dur_str}" + (f"，原因：{reason}" if reason else ""))
+            await self._send_persona_at_text(stream_id, "已将", qq, f"禁言 {dur_str}" + (f"（{reason}）" if reason else ""), "command_success", f"已将 {qq} 禁言 {dur_str}" + (f"，原因：{reason}" if reason else ""))
             self._add_log(gid, "mute", qq, reason or "管理员命令", True)
         else: await self._send_persona_text(stream_id, "禁言未能生效，请检查权限", "command_failure", "禁言未能生效，请检查权限")
         return True, "", True
