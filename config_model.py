@@ -30,6 +30,23 @@ class AutoModerateSectionConfig(PluginConfigBase):
     __ui_label__ = "自动审核"; __ui_icon__ = "zap"; __ui_order__ = 3
     enabled: bool = Field(default=True, description="是否启用自动审核")
     enabled_groups: list[str] = Field(default_factory=list, description="启用插件的群号白名单")
+    audit_model: str = Field(default="planner", description="入站LLM审核使用的任务模型: planner/utils/replyer")
+    audit_max_tokens: int = Field(default=220, description="入站LLM审核最大输出token数")
+    audit_confidence_gate: bool = Field(default=True, description="是否启用入站审核置信度门槛")
+    audit_confidence_threshold: float = Field(default=0.72, description="入站审核执行warn/mute的最低置信度")
+    audit_images: bool = Field(default=True, description="是否审核图片/表情消息")
+    image_audit_max_images: int = Field(default=4, description="单条消息最多审核的图片/表情数量")
+    forwarded_image_audit_max_images: int = Field(default=8, description="合并转发展开后最多审核的图片/表情数量")
+    image_description_timeout: float = Field(default=12.0, description="单张图片等待描述生成的最长秒数")
+    image_unknown_policy: str = Field(default="none", description="图片描述为空/超时策略: none/warn/notify_admin")
+    retry_unrecognized_media_with_image_audit: bool = Field(default=True, description='主程序未识别的图片和未审核的表情，是否读取原图再推送识图复查')
+    image_unknown_notify_owner: bool = Field(default=True, description='图片/表情包未知通知找不到最近管理员时，是否回退通知群主')
+    persona_managed_comments_enabled: bool = Field(default=False, description="是否用主程序人设和表达风格生成管理评论/提示")
+    persona_managed_comments_model: str = Field(default="replyer", description="人设化管理评论使用的模型任务名")
+    expand_forwarded_records: bool = Field(default=True, description="是否尝试展开QQ合并转发内容进行审核")
+    treat_forwarded_records_as_single_message: bool = Field(default=True, description="合并转发在刷屏计数中按单条消息处理")
+    auto_recall: bool = Field(default=False, description="审核结论要求撤回时是否自动撤回原消息")
+    trigger_moderation_reply: bool = Field(default=True, description="处置成功后是否触发麦麦主动回复")
 
 class SafeguardSectionConfig(PluginConfigBase):
     __ui_label__ = "安全管理"; __ui_icon__ = "shield-off"; __ui_order__ = 4
@@ -45,6 +62,7 @@ class SafeguardSectionConfig(PluginConfigBase):
 class WarningSectionConfig(PluginConfigBase):
     __ui_label__ = "警告系统"; __ui_icon__ = "alert-triangle"; __ui_order__ = 5
     enabled: bool = Field(default=True, description="是否启用警告系统")
+    warning_reply_prefix: str = Field(default="⚠️", description="每条警告回复前固定加入的内容，留空则不添加")
     spam_warn_threshold: int = Field(default=3, description="刷屏警告阈值")
     spam_warn_window: int = Field(default=600, description="刷屏计数窗口(秒)")
     abuse_warn_threshold: int = Field(default=1, description="辱骂警告阈值")
@@ -127,6 +145,15 @@ class PromptsSectionConfig(PluginConfigBase):
         "\n"
         "以上融入决策，不要复述。"
     ), description="规划器系统提示词（Planner 决策用）")
+    image_unknown_notice_prompt: str = Field(default=(
+        "{bot_style_context}\n\n"
+        "请用当前人设和表达风格，写一句很短的中文群聊发言，呼叫群主或管理员人工查看。\n"
+        "场景：有{unreadable_kind_detail}描述为空或超时，自动审核无法确认{unreadable_kind}内容。\n"
+        "要求：自然、简短、像群里正常说话；不要说已经违规；不要要求撤回；不要包含@；"
+        "不要解释技术细节；不要输出括号说明；不要表达出你看不到图片或表情包，"
+        "也不要表达出你看到了图片或表情包内容。\n"
+        "只输出一句话。"
+    ), description="图片/表情包描述为空或超时时，LLM生成呼叫群主或管理员提示的提示词")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 
 class GroupAdminConfig(PluginConfigBase):
