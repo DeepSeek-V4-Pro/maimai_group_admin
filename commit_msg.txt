@@ -1,0 +1,30 @@
+v2.2.0 全面代码审查与 Bug 修复
+
+全面代码审查与 Bug 修复（共 15 项）
+
+移除废弃功能（1 项）
+- 移除 /admin reload 命令及 _clear_runtime_cache() 方法（MaiBot 自带热重载，此功能多余）。
+
+配置持久化修复（1 项）
+- _save_exempt_users() 和 _save_enabled_groups() 改为原地修改 TOML 文档对象，不再创建新 table/array 替换，避免丢失配置文件中的注释和格式。
+
+Bug 修复（7 项）
+- 修复 cmd_admin_undo 未检查解禁 API 返回值、豁免移除提示始终显示的问题。
+- 修复 cmd_admin_ban / cmd_admin_unban / cmd_admin_undo 修改 exempt_users 时未加锁的竞态条件。
+- 修复 owner_allowed_commands 白名单因 command_text 从未传入而完全失效的问题。
+- 修复 cmd_admin_ban / cmd_admin_unban / cmd_admin_undo 回退正则优先匹配群号而非 QQ 号的问题。
+- 修复 tool_mute_user 超长禁言直接拒绝而非截断（与管理员命令行为不一致）。
+- 修复守门 deny_flags 包含"不能操作"导致保护名单场景误判的问题。
+- 修复 cmd_admin_shutlist 直接输出原始 JSON 的问题，改为格式化显示。
+
+代码优化（4 项）
+- 清除 17 处 API 调用中冗余的 self._to_int() 转换。
+- _check_admin_permission 消除冗余 is_owner 变量。
+- cmd_admin_mute 冷却提示措辞修正（"秒前"→"等待 N 秒"）。
+- 所有命令的 _check_admin_permission 调用传入 command_text，使 owner_allowed_commands 白名单生效。
+
+文档修正与优化（2 项）
+- 修正 README.md 和 plugin.py 中 /admin reload 移除后残留的命令数量错误与过时引用。
+- 清理 README.md 中过时的版本标记（"v1.1 新增"、"v2.0 新增" 等），补全配置示例缺失节，优化多处文案表述。
+
+更新日志是该版本开始从说明文件分离出来的。
