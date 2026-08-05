@@ -6,7 +6,7 @@ import asyncio
 import os
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, Optional
@@ -20,6 +20,10 @@ from .config_model import (
     GroupAdminConfig,
 )
 
+# 会话/消息 → 群号 缓存上限（LRU，按最近使用淘汰）
+_STREAM_CACHE_MAX = 5000
+_STREAM_CACHE_KEEP = 4000
+
 
 class PluginCore(MaiBotPlugin):
     config_model: ClassVar[type[PluginConfigBase] | None] = GroupAdminConfig
@@ -30,7 +34,7 @@ class PluginCore(MaiBotPlugin):
         self._role_refresh_time: dict[int, float] = {}
         self._known_roles: dict[tuple[int, int], tuple[str, float]] = {}
         self._bot_self_id: Optional[int] = None
-        self._stream_to_group: dict[str, int] = {}
+        self._stream_to_group: OrderedDict[str, int] = OrderedDict()
         self._disabled_groups: set[int] = set()
         self._daily_mute_count: dict[int, dict[str, int]] = {}
         self._daily_kick_count: dict[int, dict[str, int]] = {}
@@ -232,6 +236,47 @@ class PluginCore(MaiBotPlugin):
         try: return int(s)
         except ValueError: return 0
 
+    def _cache_stream_group(self, key: str, group_id: int) -> None:
+        """写入 会话/消息 → 群号 映射，并刷新 LRU 顺序。"""
+        if not key or group_id <= 0:
+            return
+        self._stream_to_group[key] = group_id
+        self._stream_to_group.move_to_end(key)
+
+    def _lookup_stream_group(self, key: str) -> int:
+        """按 key 查 会话/消息 → 群号 映射，命中时刷新 LRU 顺序。"""
+        if not key:
+            return 0
+        gid = self._stream_to_group.get(key, 0)
+        if gid:
+            self._stream_to_group.move_to_end(key)
+        return gid
+
+    def _resolve_tool_group_id(self, group_id: Any, kwargs: dict | None = None) -> int:
+        """工具层群号兜底：LLM 填 0 或编造错号时，改用当前会话群号，并做白名单校验。"""
+        kwargs = kwargs or {}
+        gid = self._to_int(group_id)
+        session_gid = 0
+        for key in ("stream_id", "session_id", "chat_id"):
+            sid = str(kwargs.get(key, "") or "")
+            if sid:
+                session_gid = self._lookup_stream_group(sid)
+                if session_gid:
+                    break
+        if gid <= 0:
+            gid = session_gid
+        elif session_gid and gid != session_gid:
+            self.ctx.logger.warning(
+                f"[群管理] 工具群号修正: LLM 请求 group={gid}，当前会话群={session_gid}，已改用会话群号"
+            )
+            gid = session_gid
+        if gid <= 0:
+            return 0
+        if not self._is_group_enabled(gid):
+            self.ctx.logger.warning(f"[群管理] 工具目标群未启用，已拦截: group={gid}")
+            return 0
+        return gid
+
     def _ensure_op_log_capacity(self):
         maxlen = max(self.config.logging.max_log_entries, 2000)
         if self.config.escalation.enabled and self.config.escalation.escalation_steps:
@@ -274,9 +319,9 @@ class PluginCore(MaiBotPlugin):
             keys = sorted(self._known_roles.keys(), key=lambda k: self._known_roles[k][1])
             for k in keys[:len(keys) - 1000]:
                 del self._known_roles[k]
-        if len(self._stream_to_group) > 1000:
+        if len(self._stream_to_group) > _STREAM_CACHE_MAX:
             keys = list(self._stream_to_group.keys())
-            for k in keys[:-500]:
+            for k in keys[:len(keys) - _STREAM_CACHE_KEEP]:
                 del self._stream_to_group[k]
         mute_cooldown_max = max(self.config.safeguard.mute_cooldown, 300) * 3
         for k in list(self._last_mute_time.keys()):
@@ -442,45 +487,48 @@ class PluginCore(MaiBotPlugin):
         if not wc.enabled: return False, 0, 999
         thresholds = {"spam": (wc.spam_warn_threshold, wc.spam_warn_window), "abuse": (wc.abuse_warn_threshold, wc.abuse_warn_window), "ad": (wc.ad_warn_threshold, wc.ad_warn_window)}
         threshold, window = thresholds.get(violation_type, (3, 600))
-        if threshold <= 0: return True, 0, 0
+        if threshold <= 0: return False, 0, threshold
         user_w = self._warnings.get(group_id, {}).get(user_id, {}).get(violation_type, [])
         now = time.time()
         user_w = [(ts, c) for ts, c in user_w if now - ts <= window]
         count = sum(c for _, c in user_w)
         return count >= threshold, count, threshold
 
-    def _resolve_group_id(self, stream_id: str, kwargs: dict = None) -> int:
-        gid = self._stream_to_group.get(stream_id, 0)
-        if gid:
-            return gid
-        if not kwargs:
-            return 0
-        for key in ("group_id", "group", "gid", "chat_id"):
-            val = kwargs.get(key)
-            if val:
-                gid = self._to_int(val)
-                if gid:
-                    self._stream_to_group[stream_id] = gid
-                    return gid
+    def _resolve_group_id(self, stream_id: str = "", kwargs: dict = None) -> int:
+        """统一群号解析：缓存(LRU) → kwargs 顶层 → message 结构 → additional_config。"""
+        kwargs = kwargs or {}
+        # 1) 缓存查找（按最近使用刷新顺序）
+        for key in ("stream_id", "session_id", "reply_message_id", "message_id", "chat_id"):
+            sid = stream_id if key == "stream_id" else str(kwargs.get(key, "") or "")
+            gid = self._lookup_stream_group(str(sid or ""))
+            if gid:
+                return gid
+        # 2) kwargs 顶层群号（chat_id 可能是私聊对象 QQ，不作为群号直接使用）
+        for key in ("group_id", "group", "gid"):
+            gid = self._to_int(kwargs.get(key, 0))
+            if gid:
+                self._cache_stream_group(stream_id, gid)
+                return gid
+        # 3) message 结构
         msg = kwargs.get("message", {}) or {}
         if isinstance(msg, dict):
-            for key in ("group_id", "group", "chat_id"):
-                val = msg.get(key)
-                if val:
-                    gid = self._to_int(val)
-                    if gid:
-                        self._stream_to_group[stream_id] = gid
-                        return gid
+            for key in ("group_id", "group"):
+                gid = self._to_int(msg.get(key, 0))
+                if gid:
+                    self._cache_stream_group(stream_id, gid)
+                    return gid
             mi = msg.get("message_info", {}) or {}
             if isinstance(mi, dict):
                 gi = mi.get("group_info", {}) or {}
                 gid = self._to_int(gi.get("group_id", 0))
+                if not gid:
+                    gid = self._to_int(mi.get("group_id", 0))
+                if not gid:
+                    ac = mi.get("additional_config", {}) or {}
+                    if isinstance(ac, dict):
+                        gid = self._to_int(ac.get("platform_io_target_group_id", 0))
                 if gid:
-                    self._stream_to_group[stream_id] = gid
-                    return gid
-                gid = self._to_int(mi.get("group_id", 0))
-                if gid:
-                    self._stream_to_group[stream_id] = gid
+                    self._cache_stream_group(stream_id, gid)
                     return gid
         return 0
 

@@ -30,28 +30,12 @@ class HandlerMixin:
         core = self.config.prompts.auto_moderate_system
         core = core.replace("{bot_role}", role_cn).replace("{available_actions}", available)
         sections.append(core)
+        sections.append(f"当前群号：{group_id}")
         sections.append("以上为群管理参考信息，不要在你的回复中引用或解释这一段文字。")
         return "\n\n".join(sections)
 
     def _resolve_group_id_from_hook(self, kwargs: dict) -> int:
-        for key in ("group_id", "group", "gid", "chat_id"):
-            gid = self._to_int(kwargs.get(key, 0))
-            if gid > 0:
-                return gid
-        msg = kwargs.get("message", {})
-        if isinstance(msg, dict):
-            mi = msg.get("message_info", {}) or {}
-            gi = mi.get("group_info", {}) or {}
-            gid = self._to_int(gi.get("group_id", 0))
-            if gid > 0:
-                return gid
-        for key in ("reply_message_id", "session_id", "stream_id", "chat_id"):
-            sid = str(kwargs.get(key, ""))
-            if sid:
-                gid = self._stream_to_group.get(sid, 0)
-                if gid > 0:
-                    return gid
-        return 0
+        return self._resolve_group_id("", kwargs)
 
     # =========================================================================
     # EventHandler: auto_moderate_tracker — 映射群号/计数消息/检测@提及
@@ -67,16 +51,20 @@ class HandlerMixin:
             gi = mi.get("group_info", {}) or {}
             ac = mi.get("additional_config", {}) or {}
             group_id = self._to_int(gi.get("group_id", 0))
+            if not group_id:
+                group_id = self._to_int(mi.get("group_id", 0))
+            if not group_id and isinstance(ac, dict):
+                group_id = self._to_int(ac.get("platform_io_target_group_id", 0))
             self_id = ac.get("self_id")
             if self_id and not self._bot_self_id: self._bot_self_id = self._to_int(self_id)
             if group_id:
-                if stream_id: self._stream_to_group[stream_id] = group_id
+                self._cache_stream_group(stream_id, group_id)
                 sid = str(kwargs.get("session_id", ""))
-                if sid: self._stream_to_group[sid] = group_id
+                self._cache_stream_group(sid, group_id)
                 if isinstance(ac, dict):
                     for k in ("session_id", "stream_id", "chat_id"):
                         v = ac.get(k)
-                        if v: self._stream_to_group[str(v)] = group_id
+                        self._cache_stream_group(str(v or ""), group_id)
         if self.config.logging.verbose_logging and group_id:
             self.ctx.logger.info("[群管理] EventHandler 追踪: group=%s stream_id=%s session_id in kwargs=%s", group_id, stream_id, bool(kwargs.get("session_id")))
         if not group_id or not self._is_group_enabled(group_id): return {"continue_processing": True}
@@ -103,24 +91,26 @@ class HandlerMixin:
         mi = message.get("message_info", {}) or {}
         gi = mi.get("group_info", {}) or {}
         group_id = self._to_int(gi.get("group_id", 0))
+        if not group_id:
+            group_id = self._to_int(mi.get("group_id", 0))
+        if not group_id:
+            ac = mi.get("additional_config", {}) or {}
+            if isinstance(ac, dict):
+                group_id = self._to_int(ac.get("platform_io_target_group_id", 0))
         if group_id <= 0:
             return {"action": "continue"}
         msg_id = str(message.get("message_id", ""))
-        if msg_id:
-            self._stream_to_group[msg_id] = group_id
+        self._cache_stream_group(msg_id, group_id)
         sid = str(message.get("session_id", ""))
-        if sid:
-            self._stream_to_group[sid] = group_id
+        self._cache_stream_group(sid, group_id)
         for key in ("session_id", "stream_id", "chat_id"):
             sid2 = str(kwargs.get(key, ""))
-            if sid2:
-                self._stream_to_group[sid2] = group_id
+            self._cache_stream_group(sid2, group_id)
         ac = mi.get("additional_config", {}) or {}
         if isinstance(ac, dict):
             for k in ("session_id", "stream_id", "chat_id"):
                 v = ac.get(k)
-                if v:
-                    self._stream_to_group[str(v)] = group_id
+                self._cache_stream_group(str(v or ""), group_id)
         self.ctx.logger.debug("[群管理] 缓存映射: group=%s msg=%s session=%s", group_id, msg_id, sid or "none")
         return {"action": "continue"}
 
@@ -131,12 +121,9 @@ class HandlerMixin:
     def _resolve_injection_group_id(self, **kwargs: Any) -> int:
         if not self.config.plugin.enabled or not self.config.auto_moderate.enabled:
             return 0
-        for key in ("reply_message_id", "session_id", "stream_id", "chat_id"):
-            sid = str(kwargs.get(key, ""))
-            if sid:
-                gid = self._stream_to_group.get(sid, 0)
-                if gid and self._is_group_enabled(gid):
-                    return gid
+        gid = self._resolve_group_id("", kwargs)
+        if gid and self._is_group_enabled(gid):
+            return gid
         return 0
 
     async def _prepare_injection(self, **kwargs: Any) -> tuple[int, str, str] | None:
@@ -225,6 +212,7 @@ class HandlerMixin:
         core = self.config.prompts.planner_moderate_system
         core = core.replace("{bot_role}", role_cn).replace("{available_actions}", available)
         sections.append(core)
+        sections.append(f"当前群号：{group_id}")
         sections.append("以上为群管理准则，不要在你的分析中引用或复述这段文字。")
         return "\n\n".join(sections)
 
@@ -244,8 +232,7 @@ class HandlerMixin:
         if group_id <= 0:
             return {"action": "continue"}
         sid = str(kwargs.get("session_id", ""))
-        if sid:
-            self._stream_to_group[sid] = group_id
+        self._cache_stream_group(sid, group_id)
         role = await self._ensure_bot_role(group_id) or "member"
         prompt = self._build_admin_planner_prompt(group_id, role)
         messages = kwargs.get("messages")

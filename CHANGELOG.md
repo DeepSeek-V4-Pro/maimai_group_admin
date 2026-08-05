@@ -1,5 +1,20 @@
 # 更新日志
 
+### v2.3.0 (2026-08-05)
+
+**群号自动获取稳定性修复 + 潜在问题修复 + 版本迭代**
+
+- 提示词注入现在会携带 `当前群号：{group_id}`（Replyer 与 Planner 两处），LLM 调用管理工具时不再需要猜测群号。
+- 18 个 Tool 增加群号兜底：LLM 填 0 或填错群号时，自动改用当前会话群号；目标群不在 `enabled_groups` 白名单时直接拦截。
+- 统一群号解析逻辑：`_resolve_group_id` 作为唯一解析入口（缓存 → kwargs → message 结构 → `additional_config.platform_io_target_group_id`），注入、守门、命令三条路径共用；修复 `chat_id` 被当作群号的问题。
+- `_stream_to_group` 缓存改为 LRU（最近使用刷新顺序），上限提高至 5000，避免活跃会话映射被批量淘汰导致注入间歇性失效。
+- `cache_session_group` / `handle_auto_moderate` 增加 `message_info.group_id` 与 `platform_io_target_group_id` 提取兜底，兼容不同适配器消息结构。
+- 修复 `_check_warning_threshold` 阈值 ≤ 0 时误报“提醒已达阈值”的问题（警告功能关闭/阈值禁用时不再输出误导性提示）。
+- 快捷命令（`/mute` `/unmute` `/kick` `/warn`）权限校验提前到昵称解析之前，未授权用户不再触发成员列表查询。
+- `/admin status` 无法确定群号时提示用法，不再显示“群 0 管理面板”。
+- `/admin on` / `/admin off` 的配置持久化加锁，与豁免名单保存保持一致，避免并发修改 `config.toml` 的竞态。
+- 版本号迭代至 2.3.0（manifest / config_version / README / CHANGELOG 同步更新）。
+
 ### v2.2.0 (2026-07-22)
 
 **全面代码审查与 Bug 修复（共 15 项）**

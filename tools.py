@@ -25,11 +25,11 @@ class ToolMixin:
     ])
     async def tool_warn_user(self, group_id: int = 0, user_id: int = 0, violation_type: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
         stream_id = str(kwargs.get("stream_id", ""))
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_warn_user", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_warn_user", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-warn: group={group_id} user={user_id} type={violation_type}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -55,12 +55,12 @@ class ToolMixin:
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="禁言原因", required=True),
     ])
     async def tool_mute_user(self, group_id: int = 0, user_id: int = 0, duration: int = 0, reason: str = "", **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
         duration = self._to_int(duration)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_mute_user", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_mute_user", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-mute: group={group_id} user={user_id} dur={duration}s")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -104,11 +104,11 @@ class ToolMixin:
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
     ])
     async def tool_unmute_user(self, group_id: int = 0, user_id: int = 0, **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_unmute_user", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_unmute_user", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-unmute: group={group_id} user={user_id}")
         async with self._lock:
             try:
@@ -129,11 +129,11 @@ class ToolMixin:
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="踢出原因", required=True),
     ])
     async def tool_kick_user(self, group_id: int = 0, user_id: int = 0, reason: str = "", **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_kick_user", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_kick_user", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-kick: group={group_id} user={user_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -175,11 +175,11 @@ class ToolMixin:
         ToolParameterInfo(name="card", param_type=ToolParamType.STRING, description="新群名片", required=True),
     ])
     async def tool_set_user_card(self, group_id: int = 0, user_id: int = 0, card: str = "", **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_set_user_card", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_set_user_card", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-card: group={group_id} user={user_id}")
         async with self._lock:
             is_protected, msg = await self._is_protected(group_id, user_id)
@@ -202,11 +202,11 @@ class ToolMixin:
         ToolParameterInfo(name="title", param_type=ToolParamType.STRING, description="专属头衔(最长6字符)", required=True),
     ])
     async def tool_set_title(self, group_id: int = 0, user_id: int = 0, title: str = "", **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_set_title", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_set_title", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-title: group={group_id} user={user_id}")
         async with self._lock:
             is_protected, msg = await self._is_protected(group_id, user_id)
@@ -228,10 +228,10 @@ class ToolMixin:
         ToolParameterInfo(name="name", param_type=ToolParamType.STRING, description="新群名称", required=True),
     ])
     async def tool_set_name(self, group_id: int = 0, name: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_set_name", "content": "无效的 group_id"}
+            return {"name": "group_set_name", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-setname: group={group_id} name={name}")
         async with self._lock:
             try:
@@ -252,10 +252,10 @@ class ToolMixin:
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="通过原因(可选)", required=False),
     ])
     async def tool_approve_join(self, group_id: int = 0, request_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_approve_join", "content": "无效的 group_id"}
+            return {"name": "group_approve_join", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-approve: group={group_id} req={request_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -282,10 +282,10 @@ class ToolMixin:
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="拒绝原因", required=True),
     ])
     async def tool_reject_join(self, group_id: int = 0, request_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_reject_join", "content": "无效的 group_id"}
+            return {"name": "group_reject_join", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-reject: group={group_id} req={request_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
@@ -313,10 +313,10 @@ class ToolMixin:
         ToolParameterInfo(name="content", param_type=ToolParamType.STRING, description="公告内容", required=True),
     ])
     async def tool_post_notice(self, group_id: int = 0, content: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_post_notice", "content": "无效的 group_id"}
+            return {"name": "group_post_notice", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-notice-post: group={group_id}")
         async with self._lock:
             try:
@@ -340,10 +340,10 @@ class ToolMixin:
         ToolParameterInfo(name="notice_id", param_type=ToolParamType.STRING, description="公告ID (来自 group_get_notice)", required=True),
     ])
     async def tool_delete_notice(self, group_id: int = 0, notice_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_delete_notice", "content": "无效的 group_id"}
+            return {"name": "group_delete_notice", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-notice-del: group={group_id}")
         async with self._lock:
             try:
@@ -359,10 +359,10 @@ class ToolMixin:
         ToolParameterInfo(name="message_id", param_type=ToolParamType.STRING, description="消息ID (用户回复目标消息后提取)", required=True),
     ])
     async def tool_set_essence(self, group_id: int = 0, message_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_set_essence", "content": "无效的 group_id"}
+            return {"name": "group_set_essence", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-essence-set: group={group_id}")
         async with self._lock:
             try:
@@ -378,10 +378,10 @@ class ToolMixin:
         ToolParameterInfo(name="message_id", param_type=ToolParamType.STRING, description="消息ID (用户回复目标消息后提取)", required=True),
     ])
     async def tool_unset_essence(self, group_id: int = 0, message_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_unset_essence", "content": "无效的 group_id"}
+            return {"name": "group_unset_essence", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-essence-del: group={group_id}")
         async with self._lock:
             try:
@@ -398,10 +398,10 @@ class ToolMixin:
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="撤回原因", required=True),
     ])
     async def tool_recall_msg(self, group_id: int = 0, message_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_recall_msg", "content": "无效的 group_id"}
+            return {"name": "group_recall_msg", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-recall: group={group_id} mid={message_id}")
         async with self._lock:
             try:
@@ -417,11 +417,11 @@ class ToolMixin:
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
     ])
     async def tool_get_member(self, group_id: int = 0, user_id: int = 0, **kwargs: Any) -> dict[str, Any]:
-        del kwargs
-        group_id = self._to_int(group_id)
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
+        del kwargs
         if group_id <= 0 or user_id <= 0:
-            return {"name": "group_get_member", "content": "无效的 group_id 或 user_id"}
+            return {"name": "group_get_member", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-get-member: group={group_id} user={user_id}")
         async with self._lock:
             self._get_member_called.setdefault(group_id, {})[user_id] = time.time()
@@ -440,10 +440,10 @@ class ToolMixin:
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
     ])
     async def tool_get_shut_list(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_get_shut_list", "content": "无效的 group_id"}
+            return {"name": "group_get_shut_list", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-get-shutlist: group={group_id}")
         async with self._lock:
             try:
@@ -458,10 +458,10 @@ class ToolMixin:
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
     ])
     async def tool_get_notice(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_get_notice", "content": "无效的 group_id"}
+            return {"name": "group_get_notice", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-get-notice: group={group_id}")
         async with self._lock:
             try:
@@ -477,10 +477,10 @@ class ToolMixin:
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
     ])
     async def tool_get_system_msg(self, group_id: int = 0, **kwargs: Any) -> dict[str, Any]:
+        group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
-        group_id = self._to_int(group_id)
         if group_id <= 0:
-            return {"name": "group_get_system_msg", "content": "无效的 group_id"}
+            return {"name": "group_get_system_msg", "content": "无效的 group_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-get-sysmsg: group={group_id}")
         async with self._lock:
             try:

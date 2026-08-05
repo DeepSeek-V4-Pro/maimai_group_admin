@@ -10,7 +10,7 @@ from maibot_sdk import Field, PluginConfigBase
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.2.0", description="配置版本")
+    config_version: str = Field(default="2.3.0", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1

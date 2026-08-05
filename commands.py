@@ -22,6 +22,9 @@ class CommandMixin:
         matched = matched_groups or {}
         gid = int(matched.get("group_id", 0) or 0) or self._resolve_group_id(stream_id, kwargs)
         if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if gid <= 0:
+            await self.ctx.send.text("无法确定当前群号，请使用: /admin status [群号]", stream_id)
+            return True, "", True
         role = self._get_group_role(gid)
         if role is None and gid: role = await self._ensure_bot_role(gid)
         role = role or "未知"
@@ -46,11 +49,12 @@ class CommandMixin:
         matched = matched_groups or {}
         gid = int(matched.get("group_id", 0) or 0) or self._resolve_group_id(stream_id, kwargs)
         if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
-        enabled_groups = [int(x) for x in self.config.auto_moderate.enabled_groups]
-        if gid in enabled_groups:
-            self.config.auto_moderate.enabled_groups = [str(g) for g in enabled_groups if g != gid]
-            await self._save_enabled_groups()
-        self._disabled_groups.add(gid)
+        async with self._lock:
+            enabled_groups = [int(x) for x in self.config.auto_moderate.enabled_groups]
+            if gid in enabled_groups:
+                self.config.auto_moderate.enabled_groups = [str(g) for g in enabled_groups if g != gid]
+                await self._save_enabled_groups()
+            self._disabled_groups.add(gid)
         await self.ctx.send.text(f"已关闭群 {gid} 的自动管理", stream_id)
         return True, "", True
 
@@ -59,13 +63,14 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-on: stream={stream_id}")
         matched = matched_groups or {}
         gid = int(matched.get("group_id", 0) or 0) or self._resolve_group_id(stream_id, kwargs)
-        enabled_groups = [int(x) for x in self.config.auto_moderate.enabled_groups]
         if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
-        if gid not in enabled_groups:
-            self.config.auto_moderate.enabled_groups.append(str(gid))
-            enabled_groups.append(gid)
-            await self._save_enabled_groups()
-        self._disabled_groups.discard(gid)
+        async with self._lock:
+            enabled_groups = [int(x) for x in self.config.auto_moderate.enabled_groups]
+            if gid not in enabled_groups:
+                self.config.auto_moderate.enabled_groups.append(str(gid))
+                enabled_groups.append(gid)
+                await self._save_enabled_groups()
+            self._disabled_groups.discard(gid)
         await self.ctx.send.text(f"已恢复群 {gid} 的自动管理", stream_id)
         return True, "", True
 
@@ -184,12 +189,12 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-mute: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         target = (matched.get("target") or "").strip(); duration = int(matched.get("duration", 0) or 0)
         unit = (matched.get("unit") or "分钟").strip(); reason = (matched.get("reason") or "").strip()
         if not target or duration <= 0: await self.ctx.send.text("用法: /mute @qq或昵称 N分钟 [原因]", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
         if not qq: return True, "", True
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         if unit in ("小时", "h"): duration *= 3600
         elif unit in ("秒", "s"): pass
         else: duration *= 60
@@ -231,11 +236,11 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-admin-unmute: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         target = (matched.get("target") or "").strip()
         if not target: await self.ctx.send.text("用法: /unmute @qq或昵称", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
         if not qq: return True, "", True
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         ok, _ = await self._call_api(api_name="adapter.napcat.group.set_group_ban", group_id=gid, user_id=qq, duration=0)
         if ok: await self._send_at_text(stream_id, "已解除", qq, "的禁言")
         else: await self.ctx.send.text("解禁未能生效，请检查权限", stream_id)
@@ -246,11 +251,11 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-kick: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         target = (matched.get("target") or "").strip(); reason = (matched.get("reason") or "").strip()
         if not target: await self.ctx.send.text("用法: /kick @qq或昵称 [原因]", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
         if not qq: return True, "", True
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         is_protected, msg = await self._is_protected(gid, qq)
         if is_protected: await self.ctx.send.text(f"操作被拦截: {msg}", stream_id); return True, "", True
         esc = self._check_escalation(gid, qq)
@@ -276,11 +281,11 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-warn: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         target = (matched.get("target") or "").strip(); vtype = (matched.get("type") or "").strip(); reason = (matched.get("reason") or "").strip()
         if not target or not vtype: await self.ctx.send.text("用法: /warn @qq或昵称 spam/abuse/ad [原因]", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
         if not qq: return True, "", True
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
         async with self._lock:
             self._warnings.setdefault(gid, {}).setdefault(qq, {}).setdefault(vtype, []).append((time.time(), 1))
         self._add_log(gid, "warn", qq, reason or "管理员命令", True)
