@@ -44,6 +44,7 @@ class PluginCore(MaiBotPlugin):
         self._op_log: deque[dict[str, Any]] = deque(maxlen=5000)
         self._get_member_called: dict[int, dict[int, float]] = {}
         self._last_mute_time: dict[tuple[int, int], float] = {}
+        self._last_tool_executed: dict[tuple[int, str], float] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
         self._auto_check_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
@@ -236,6 +237,16 @@ class PluginCore(MaiBotPlugin):
         try: return int(s)
         except ValueError: return 0
 
+    def _mark_tool_executed(self, group_id: int, action: str) -> None:
+        """记录一次真实完成的工具执行，供守门校验"编造已执行"回复使用。"""
+        if group_id > 0 and action:
+            self._last_tool_executed[(group_id, action)] = time.time()
+
+    def _was_tool_executed_recently(self, group_id: int, action: str, window_seconds: float = 30.0) -> bool:
+        """判断某类管理工具是否在最近 window_seconds 内真实执行成功过。"""
+        executed_at = self._last_tool_executed.get((group_id, action), 0)
+        return executed_at > 0 and (time.time() - executed_at) <= window_seconds
+
     def _cache_stream_group(self, key: str, group_id: int) -> None:
         """写入 会话/消息 → 群号 映射，并刷新 LRU 顺序。"""
         if not key or group_id <= 0:
@@ -327,6 +338,9 @@ class PluginCore(MaiBotPlugin):
         for k in list(self._last_mute_time.keys()):
             if now - self._last_mute_time[k] > mute_cooldown_max:
                 del self._last_mute_time[k]
+        for key in list(self._last_tool_executed.keys()):
+            if now - self._last_tool_executed[key] > 120:
+                del self._last_tool_executed[key]
         for gid in list(self._get_member_called.keys()):
             for uid in list(self._get_member_called[gid].keys()):
                 if now - self._get_member_called[gid][uid] > 300:

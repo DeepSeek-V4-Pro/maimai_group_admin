@@ -10,7 +10,7 @@ from maibot_sdk import Field, PluginConfigBase
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.3.0", description="配置版本")
+    config_version: str = Field(default="2.4.0", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1
@@ -106,7 +106,12 @@ class PromptsSectionConfig(PluginConfigBase):
         "\n"
         "操作前先用 group_get_member 确认目标身份；撤回/精华需先回复目标消息获取 message_id\n"
         "\n"
-        "节奏：正常聊天，发现违规再处理。不要说\"已将xxx禁言\"这类话"
+        "执行规则（必须遵守）：\n"
+        "  - 所有管理操作必须真实调用对应的 group_* 工具完成，工具已直接可用，无需搜索\n"
+        "  - 禁止只用文字宣称\"已禁言/已撤回/已踢出\"等结果；没有真实调用工具前，不要声称操作已完成\n"
+        "  - 不要说\"已将xxx禁言\"这类话，执行后保持人设自然回复即可\n"
+        "\n"
+        "节奏：正常聊天，发现违规再处理。"
     ), description="自动审核系统提示词（Replyer 用）")
     planner_moderate_system: str = Field(default=(
         "# 群管理准则\n"
@@ -124,6 +129,8 @@ class PromptsSectionConfig(PluginConfigBase):
         "- 操作前先调 group_get_member 确认身份\n"
         "- 禁言不超1小时，踢人前确认\n"
         "- 不确定则先观察\n"
+        "- 需要执行管理操作时，必须在本轮直接调用对应的 group_* 工具，不要只在分析里宣布\"我要禁言/撤回/踢出\"却不调用工具\n"
+        "- 不要声称某个操作已经完成，除非你确实调用了对应工具并看到成功结果\n"
         "\n"
         "以上融入决策，不要复述。"
     ), description="规划器系统提示词（Planner 决策用）")

@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional
 
 from maibot_sdk import EventHandler, HookHandler
 from maibot_sdk.types import ErrorPolicy, EventType, HookMode, HookOrder
+
+
+# 守门：Bot 回复中"宣称已完成管理操作"的句式 → 对应工具动作。
+# 顺序敏感：先匹配更具体的动作（如"解除禁言"优先于"禁言"），命中即停止。
+_ACTION_CLAIM_PATTERNS: list[tuple[str, "re.Pattern"]] = [
+    ("unmute", re.compile(r"已解禁|已解除\S{0,12}?禁言|解除\S{0,12}?禁言了")),
+    ("mute", re.compile(r"已将@?\s*\S{0,12}?\s*禁言|已把\S{0,12}?禁言|已对\S{0,12}?禁言|已经?禁言了|已禁言了")),
+    ("kick", re.compile(r"已将@?\s*\S{0,12}?\s*踢出|已把\S{0,12}?踢出|已踢出\S{0,8}?了")),
+    ("recall", re.compile(r"已撤回|已经?撤回")),
+    ("essence", re.compile(r"已设\S{0,8}?精华|设为精华|已将\S{0,12}?设为精华")),
+    ("unessence", re.compile(r"已取消\S{0,8}?精华|取消\S{0,8}?精华了")),
+    ("warn", re.compile(r"已警告|已提醒|已向\S{0,12}?发出\S{0,8}?(警告|提醒)")),
+    ("notice", re.compile(r"已发布公告|公告已发布")),
+    ("delete_notice", re.compile(r"已删除公告|公告已删除")),
+    ("approve", re.compile(r"已通过\S{0,8}?申请|已同意\S{0,12}?(入群|申请)")),
+    ("reject", re.compile(r"已拒绝\S{0,8}?申请")),
+    ("card", re.compile(r"已将\S{0,12}?名片改|已修改\S{0,8}?名片|已改\S{0,8}?名片")),
+    ("title", re.compile(r"已\S{0,8}?头衔")),
+    ("set_name", re.compile(r"已\S{0,8}?群名改|群名已改")),
+]
 
 
 class HandlerMixin:
@@ -295,5 +316,16 @@ class HandlerMixin:
                 self.ctx.logger.info(f"[群管理] 守门拦截: Bot(role={role})错误宣称无权限, group={group_id}\n--- 原始回复 ---\n{response_text}\n--- 替换为 ---\n{correction}")
             else:
                 self.ctx.logger.warning(f"[群管理] 守门拦截: Bot(role={role})错误宣称无权限, group={group_id}, text={response_text[:80]}")
+            return {"action": "continue", "modified_kwargs": {"response": correction}}
+        for action, claim_pattern in _ACTION_CLAIM_PATTERNS:
+            if not claim_pattern.search(response_text):
+                continue
+            if self._was_tool_executed_recently(group_id, action):
+                break
+            correction = "刚才提到的操作我并没有真正执行，先不打扰大家了。"
+            if self.config.logging.verbose_logging:
+                self.ctx.logger.info(f"[群管理] 守门拦截: Bot 口头宣称已执行但无真实工具调用, group={group_id}, action={action}\n--- 原始回复 ---\n{response_text}\n--- 替换为 ---\n{correction}")
+            else:
+                self.ctx.logger.warning(f"[群管理] 守门拦截: Bot 口头宣称已执行但无真实工具调用, group={group_id}, action={action}, text={response_text[:80]}")
             return {"action": "continue", "modified_kwargs": {"response": correction}}
         return {"action": "continue"}
