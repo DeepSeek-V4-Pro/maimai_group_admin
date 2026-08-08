@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "version": "2.4.0",
+  "version": "2.5.0",
   "name": "群管理助手",
-  "description": "群管理助手 v2.4 — 给 QQ 群装一个自动小管理员：广告/刷屏/骂人自动警告、禁言、踢出，支持群公告、撤回消息、设精华、入群审批，以及 /mute、/kick、/warn 等快捷命令。配置群号即可使用。",
+  "description": "群管理助手 v2.5 — 给 QQ 群装一个自动小管理员：自动识别群主/管理员身份，广告/刷屏/骂人自动警告、禁言、踢出，支持群公告、撤回消息、设精华、入群审批、权限决策链排查，以及 /mute、/kick、/warn 等快捷命令。配置群号即可使用。",
   "author": {
     "name": "DeepSeek-V4",
     "url": "https://github.com/DeepSeek-V4-Pro"

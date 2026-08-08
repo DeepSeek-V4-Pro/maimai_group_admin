@@ -1,4 +1,4 @@
-"""群管理助手 — 14 个管理员命令"""
+"""群管理助手 — 15 个管理员命令"""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from maibot_sdk import Command
 
 
 class CommandMixin:
-    """14 个管理员命令（7 个 /admin 系列 + 7 个快捷操作）。"""
+    """15 个管理员命令（8 个 /admin 系列 + 7 个快捷操作）。"""
 
     # =========================================================================
-    # Command: /admin 系列 (7个)
+    # Command: /admin 系列 (8个)
     # =========================================================================
 
     @Command("admin_status", description="查看群管理运行状态", pattern=r"^/admin\s+status(?:\s+(?P<group_id>\d+))?")
@@ -41,6 +41,46 @@ class CommandMixin:
             f"今日已禁言 {mute_cnt} 人（上限 {mute_limit}），已踢出 {kick_cnt} 人（上限 {kick_limit}）"
         )
         await self.ctx.send.text(info, stream_id)
+        return True, "", True
+
+    @Command("admin_permcheck", description="查看权限决策链: /admin perm [@qq|昵称]", pattern=r"^/admin\s+(?:perm|perms|permcheck)(?:\s+@?(?P<target>\S+))?")
+    async def cmd_admin_permcheck(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-perm: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        target = (matched.get("target") or "").strip()
+        if not target:
+            target = str(self._to_int(user_id))
+        if target.isdigit():
+            qq = int(target)
+        else:
+            qq = await self._resolve_target(gid, target, stream_id)
+            if not qq:
+                return True, "", True
+        chain = self._new_permission_chain(gid, qq, "查询")
+        role = await self._check_target_role(gid, qq, force_refresh=True)
+        self._chain_add(chain, "群成员身份查询", bool(role), f"role={role or 'unknown'}")
+        admins = self.config.admin.admins
+        in_admins = str(qq) in admins
+        self._chain_add(chain, "全局管理员名单", in_admins, f"{qq} 是否在 admin.admins 中")
+        if role == "owner":
+            self._chain_add(chain, "群主授权", self.config.admin.allow_group_owner, f"allow_group_owner={self.config.admin.allow_group_owner}")
+            if self.config.admin.allow_group_owner:
+                allowed = self.config.admin.owner_allowed_commands
+                if not allowed:
+                    self._chain_add(chain, "群主命令白名单", True, "白名单为空=全部可用")
+                else:
+                    self._chain_add(chain, "群主命令白名单", True, f"仅限: {', '.join(allowed)}")
+        elif role == "admin":
+            self._chain_add(chain, "管理员命令权限", False, "群管理员需先在 admin.admins 中登记才能使用 /admin 命令")
+        protected, pmsg = await self._is_protected(gid, qq, chain)
+        bot_role = await self._ensure_bot_role(gid)
+        self._chain_add(chain, "Bot 自身角色", bot_role in ("owner", "admin"), f"bot_role={bot_role or 'unknown'}（工具执行前提）")
+        self._chain_add(chain, "目标可操作性", not protected, pmsg if protected else "未命中保护/豁免")
+        can_command = in_admins or (role == "owner" and self.config.admin.allow_group_owner)
+        self._chain_finish(chain, can_command, "可执行管理命令" if can_command else "不可执行管理命令（仅展示决策链）")
+        await self.ctx.send.text(self._chain_format_text(chain), stream_id)
         return True, "", True
 
     @Command("admin_off", description="关闭指定群的自动管理", pattern=r"^/admin\s+off(?:\s+(?P<group_id>\d+))?")
@@ -343,7 +383,7 @@ class CommandMixin:
                 for item in shut_list:
                     uid = item.get("user_id", "?")
                     nick = item.get("nickname", item.get("card", ""))
-                    remain = item.get("remaining_time", "?")
+                    remain = item.get("remaining_time", item.get("time", "?"))
                     lines.append(f"  @{uid} {nick} — 剩余 {remain} 秒")
                 await self.ctx.send.text("\n".join(lines), stream_id)
             else:

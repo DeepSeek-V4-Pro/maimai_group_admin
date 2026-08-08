@@ -44,12 +44,15 @@ class HandlerMixin:
 
     # ===== Prompt 构建 =====
 
-    def _build_admin_prompt(self, group_id: int, role: str) -> str:
+    def _build_admin_prompt(self, group_id: int, role: str, sender_role: Optional[str] = None, sender_id: int = 0) -> str:
         sections: list[str] = [self.PROMPT_MARKER]
         role_cn = self._ROLE_CN.get(role, role)
+        sender_cn = self._ROLE_CN.get(sender_role or "", sender_role or "未知")
+        sender_id_str = str(sender_id) if sender_id else "未知"
         available = self._ACTIONS_BY_ROLE.get(role, self._ACTIONS_BY_ROLE["member"])
         core = self.config.prompts.auto_moderate_system
         core = core.replace("{bot_role}", role_cn).replace("{available_actions}", available)
+        core = core.replace("{sender_role}", sender_cn).replace("{sender_id}", sender_id_str)
         sections.append(core)
         sections.append(f"当前群号：{group_id}")
         sections.append("以上为群管理参考信息，不要在你的回复中引用或解释这一段文字。")
@@ -65,8 +68,8 @@ class HandlerMixin:
     @EventHandler("auto_moderate_tracker", description="自动审核追踪: 映射群号、计数消息、检测@提及", event_type=EventType.ON_MESSAGE)
     async def handle_auto_moderate(self, message: Any = None, stream_id: str = "", **kwargs: Any):
         if not self.config.plugin.enabled: return {"continue_processing": True}
-        if not self.config.auto_moderate.enabled: return {"continue_processing": True}
         group_id = 0
+        sender_id = 0
         if isinstance(message, dict):
             mi = message.get("message_info", {}) or {}
             gi = mi.get("group_info", {}) or {}
@@ -86,10 +89,22 @@ class HandlerMixin:
                     for k in ("session_id", "stream_id", "chat_id"):
                         v = ac.get(k)
                         self._cache_stream_group(str(v or ""), group_id)
+                sender_id = self._extract_sender_id(kwargs, message)
+                if sender_id:
+                    self._cache_stream_sender(stream_id, sender_id)
+                    self._cache_stream_sender(sid, sender_id)
+                    if isinstance(ac, dict):
+                        for k in ("session_id", "stream_id", "chat_id"):
+                            v = ac.get(k)
+                            self._cache_stream_sender(str(v or ""), sender_id)
         if self.config.logging.verbose_logging and group_id:
             self.ctx.logger.info("[群管理] EventHandler 追踪: group=%s stream_id=%s session_id in kwargs=%s", group_id, stream_id, bool(kwargs.get("session_id")))
+        if not self.config.auto_moderate.enabled:
+            return {"continue_processing": True}
         if not group_id or not self._is_group_enabled(group_id): return {"continue_processing": True}
         await self._ensure_bot_role(group_id)
+        if sender_id:
+            await self._refresh_sender_role(group_id, sender_id)
         if time.time() - self._last_cleanup_time > 3600:
             self._cleanup_memory()
         return {"continue_processing": True}
@@ -132,6 +147,17 @@ class HandlerMixin:
             for k in ("session_id", "stream_id", "chat_id"):
                 v = ac.get(k)
                 self._cache_stream_group(str(v or ""), group_id)
+        sender_id = self._extract_sender_id(kwargs, message)
+        if sender_id:
+            self._cache_stream_sender(msg_id, sender_id)
+            self._cache_stream_sender(sid, sender_id)
+            for key in ("session_id", "stream_id", "chat_id"):
+                sid2 = str(kwargs.get(key, ""))
+                self._cache_stream_sender(sid2, sender_id)
+            if isinstance(ac, dict):
+                for k in ("session_id", "stream_id", "chat_id"):
+                    v = ac.get(k)
+                    self._cache_stream_sender(str(v or ""), sender_id)
         self.ctx.logger.debug("[群管理] 缓存映射: group=%s msg=%s session=%s", group_id, msg_id, sid or "none")
         return {"action": "continue"}
 
@@ -147,7 +173,7 @@ class HandlerMixin:
             return gid
         return 0
 
-    async def _prepare_injection(self, **kwargs: Any) -> tuple[int, str, str] | None:
+    async def _prepare_injection(self, **kwargs: Any) -> tuple[int, str, str, int, Optional[str]] | None:
         if not self.config.plugin.enabled or not self.config.auto_moderate.enabled:
             return None
         group_id = self._resolve_injection_group_id(**kwargs)
@@ -156,8 +182,21 @@ class HandlerMixin:
         if group_id <= 0:
             return None
         role = await self._ensure_bot_role(group_id) or "member"
-        prompt = self._build_admin_prompt(group_id, role)
-        return group_id, role, prompt
+        sender_id = self._resolve_sender_for_injection(kwargs)
+        sender_role = await self._refresh_sender_role(group_id, sender_id) if sender_id else None
+        prompt = self._build_admin_prompt(group_id, role, sender_role, sender_id)
+        return group_id, role, prompt, sender_id, sender_role
+
+    def _resolve_sender_for_injection(self, kwargs: dict) -> int:
+        sender_id = self._extract_sender_id(kwargs)
+        if sender_id:
+            return sender_id
+        for key in ("session_id", "stream_id", "chat_id"):
+            sid = str(kwargs.get(key, "") or "")
+            sender_id = self._lookup_stream_sender(sid)
+            if sender_id:
+                return sender_id
+        return 0
 
     # =========================================================================
     # HookHandler: before_request — 注入 extra_prompt（v1.4）
@@ -174,10 +213,10 @@ class HandlerMixin:
     async def inject_admin_prompt(self, **kwargs: Any):
         prep = await self._prepare_injection(**kwargs)
         if not prep: return {"action": "continue"}
-        group_id, role, prompt = prep
+        group_id, role, prompt, sender_id, sender_role = prep
         extra = str(kwargs.get("extra_prompt") or "")
         extra = f"{extra}\n\n{prompt}" if extra else prompt
-        self.ctx.logger.debug("[群管理] before_request 注入 extra_prompt: group=%s role=%s", group_id, role)
+        self.ctx.logger.debug("[群管理] before_request 注入 extra_prompt: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
         return {"action": "continue", "modified_kwargs": {"extra_prompt": extra}}
 
     # =========================================================================
@@ -195,7 +234,7 @@ class HandlerMixin:
     async def inject_admin_model_prompt(self, **kwargs: Any):
         prep = await self._prepare_injection(**kwargs)
         if not prep: return {"action": "continue"}
-        group_id, role, prompt = prep
+        group_id, role, prompt, sender_id, sender_role = prep
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
             return {"action": "continue"}
@@ -219,19 +258,22 @@ class HandlerMixin:
         if not inserted:
             msg: dict[str, str] = {"role": "system", "content": prompt}
             updated.insert(0, msg)
-        self.ctx.logger.debug("[群管理] before_model_request 注入 messages: group=%s role=%s", group_id, role)
+        self.ctx.logger.debug("[群管理] before_model_request 注入 messages: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
         return {"action": "continue", "modified_kwargs": {"messages": updated}}
 
     # =========================================================================
     # HookHandler: planner.before_request — 注入 Planner 决策提示词
     # =========================================================================
 
-    def _build_admin_planner_prompt(self, group_id: int, role: str) -> str:
+    def _build_admin_planner_prompt(self, group_id: int, role: str, sender_role: Optional[str] = None, sender_id: int = 0) -> str:
         sections: list[str] = [self.PROMPT_MARKER]
         role_cn = self._ROLE_CN.get(role, role)
+        sender_cn = self._ROLE_CN.get(sender_role or "", sender_role or "未知")
+        sender_id_str = str(sender_id) if sender_id else "未知"
         available = self._ACTIONS_BY_ROLE.get(role, self._ACTIONS_BY_ROLE["member"])
         core = self.config.prompts.planner_moderate_system
         core = core.replace("{bot_role}", role_cn).replace("{available_actions}", available)
+        core = core.replace("{sender_role}", sender_cn).replace("{sender_id}", sender_id_str)
         sections.append(core)
         sections.append(f"当前群号：{group_id}")
         sections.append("以上为群管理准则，不要在你的分析中引用或复述这段文字。")
@@ -255,7 +297,9 @@ class HandlerMixin:
         sid = str(kwargs.get("session_id", ""))
         self._cache_stream_group(sid, group_id)
         role = await self._ensure_bot_role(group_id) or "member"
-        prompt = self._build_admin_planner_prompt(group_id, role)
+        sender_id = self._resolve_sender_for_injection(kwargs)
+        sender_role = await self._refresh_sender_role(group_id, sender_id) if sender_id else None
+        prompt = self._build_admin_planner_prompt(group_id, role, sender_role, sender_id)
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
             return {"action": "continue"}
@@ -276,7 +320,7 @@ class HandlerMixin:
             updated.append(message)
         if not inserted:
             updated.insert(0, {"role": "system", "content": prompt})
-        self.ctx.logger.debug("[群管理] planner.before_request 注入成功: group=%s role=%s", group_id, role)
+        self.ctx.logger.debug("[群管理] planner.before_request 注入成功: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
         return {"action": "continue", "modified_kwargs": {"messages": updated}}
 
     # =========================================================================
@@ -309,7 +353,8 @@ class HandlerMixin:
         if role not in ("owner", "admin"):
             return {"action": "continue"}
         deny_flags = ("我没有权限", "我不能执行", "我无法进行", "我做不到", "权限不足", "无法禁言", "无法踢人", "我没有这个权限")
-        if any(flag in response_text for flag in deny_flags):
+        legit_reason_flags = ("保护名单", "豁免名单", "冷却中", "已达每日上限", "处罚阶梯", "未找到成员")
+        if any(flag in response_text for flag in deny_flags) and not any(flag in response_text for flag in legit_reason_flags):
             role_cn = self._ROLE_CN.get(role, role)
             correction = f"我是{role_cn}，我来处理。"
             if self.config.logging.verbose_logging:

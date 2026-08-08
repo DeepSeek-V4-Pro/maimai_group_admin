@@ -1,5 +1,38 @@
 # 更新日志
 
+### v2.5.0 (2026-08-08)
+
+**对话身份识别 + 高频缓存刷新 + 权限决策链可视化 + 提示词优化**
+
+**功能优化（1 项）**
+- 对话中主动识别当前发言者身份：不再依赖"调用管理工具时才查询身份"。每条群消息到达时由 EventHandler 提取发言者 QQ 号并缓存，再按节流间隔（默认 120 秒）刷新身份；注入 Replyer/Planner 的提示词携带"当前发言者：群主/管理员/普通成员"，LLM 在回复前就知道对方身份，避免"先质疑群主是冒充的、调用工具后才认出来"的错位。
+
+**缓存刷新（3 项）**
+- 群成员身份缓存有效期由固定 1 小时改为可配置 `identity.role_cache_ttl_seconds`（默认 600 秒，10 分钟），目标身份（禁言/踢人对象）权限信息不再长期滞后。
+- Bot 自身角色刷新间隔由固定 30 分钟改为可配置 `identity.bot_role_refresh_seconds`（默认 300 秒，5 分钟）；检测失败时 60 秒后自动重试，不再长时间停留在错误的"普通成员"状态。
+- 新增 `identity.sender_role_refresh_seconds`（默认 120 秒）控制发言者身份主动刷新频率；`group_get_member` 工具仍强制走 API 获取最新身份。
+
+**权限决策链可视化（2 项）**
+- 新增 `/admin perm [@qq|昵称]` 命令：完整展示"身份查询 → 全局管理员名单 → 群主授权/命令白名单 → 保护/豁免名单 → Bot 自身角色"的判断链（`✓/✗` + 原因），方便排查权限问题。
+- 命令权限校验（`_check_admin_permission`）与 `/admin perm` 均输出结构化决策链日志；`verbose_logging=true` 时输出每一步详情，普通模式输出摘要。
+
+**提示词优化（1 项）**
+- `auto_moderate_system` / `planner_moderate_system` 默认模板新增 `{sender_role}`、`{sender_id}` 变量与"发言者身份规则"：群主/管理员不得质疑，其管理指令视为授权；普通成员无权指挥管理操作；身份以最近一次查询结果为准。同时大幅压缩模板体积（改用紧凑要点式，保留全部行为约束），降低 token 开销。
+
+**Bug 修复与其他优化（9 项）**
+- 修复发言者身份提取失败问题：MaiBot 序列化消息中发送者 QQ 位于 `message_info.user_info.user_id`（此前错误使用 `sender_info`，导致提示词一直显示"发言者：未知"）；现兼容 `user_info` / `sender_info` 两种结构。
+- 对照 napcat-adapter v1.3.2 全量核对 16 个适配器接口（30 处调用）：API 名称、参数名、direct/action 两种调用方式、失败语义（适配器在 NapCat 返回非 ok 时抛错，工具正确上报失败）全部匹配。
+- `group_post_notice` 修复公告 ID 提取：适配器返回的是 OneBot 原始信封（`data` 内嵌），此前未解包导致 `notice_id` 经常取不到；现在先取 `data` 再读 `notice_id`。
+- `/shutlist` 剩余时长字段兜底：NapCat 可能返回 `time` 而非 `remaining_time`，现在两者兼容。
+- `_check_target_role` 不再缓存空身份结果：API 返回空 role 时下次直接重查，避免权限判断被空缓存卡住。
+- 工具层群号兜底新增 message 结构直读：`_resolve_tool_group_id` 在缓存缺失时从当前消息提取群号并回写缓存，群号信息更实时。
+- 群号映射缓存不再依赖自动审核开关：`auto_moderate.enabled=false` 时仍缓存 group_id → 会话映射，`/admin` 命令在纯命令模式下也能解析群号。
+- 守门 `guard_admin_response` 修正误伤：回复包含"保护名单/豁免名单/冷却中/已达每日上限/处罚阶梯/未找到成员"等正当拒绝原因时，不再强制改写为"我是群主，我来处理"。
+- `group_get_member` 返回中文身份（群主/管理员/普通成员）+ 英文 role 值，方便 LLM 理解。
+
+**其他**
+- 版本号迭代至 2.5.0（manifest / config_version / README / CHANGELOG 同步更新），README 更新配置说明、命令数量（15 个）、FAQ 与功能总览。
+
 ### v2.4.0 (2026-08-06)
 
 **修复 Bot "口头宣称执行但实际未执行" + 插件简介/文档全面优化**

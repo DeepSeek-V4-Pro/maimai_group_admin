@@ -333,7 +333,9 @@ class ToolMixin:
                 if not ok: return {"name": "group_post_notice", "content": f"发布公告未能生效: {data}"}
                 notice_id = ""
                 if isinstance(data, dict):
-                    notice_id = str(data.get("notice_id", data.get("noticeId", data.get("id", ""))))
+                    payload = data.get("data", data)
+                    if isinstance(payload, dict):
+                        notice_id = str(payload.get("notice_id", payload.get("noticeId", payload.get("id", ""))))
                 result = "群公告已发布"
                 if notice_id:
                     result += f"，ID: {notice_id}"
@@ -444,7 +446,8 @@ class ToolMixin:
                 if ok and isinstance(data, dict):
                     role = data.get("role", "unknown"); card = data.get("card", ""); nick = data.get("nickname", "")
                     self._known_roles[(group_id, user_id)] = (role, time.time())
-                    return {"name": "group_get_member", "content": f"@{user_id}: 昵称={nick}, 群名片={card}, 身份={role}"}
+                    role_cn = {"owner": "群主", "admin": "管理员", "member": "普通成员"}.get(role, role)
+                    return {"name": "group_get_member", "content": f"@{user_id}: 昵称={nick}, 群名片={card}, 身份={role_cn}({role})"}
                 return {"name": "group_get_member", "content": f"未找到 @{user_id} 的信息"}
             except Exception:
                 self.ctx.logger.error(f"[群管理] Tool-get-member 异常: group={group_id} user={user_id}", exc_info=True)

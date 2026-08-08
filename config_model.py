@@ -10,7 +10,7 @@ from maibot_sdk import Field, PluginConfigBase
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.4.0", description="配置版本")
+    config_version: str = Field(default="2.5.0", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1
@@ -25,6 +25,9 @@ class IdentitySectionConfig(PluginConfigBase):
     auto_detect: bool = Field(default=True, description="留空自动获取bot角色")
     bot_qq: str = Field(default="", description="Bot的QQ号,留空则从消息事件自动获取")
     override_roles: dict[str, str] = Field(default_factory=dict, description="手动覆盖指定群的bot角色")
+    role_cache_ttl_seconds: int = Field(default=600, description="群成员身份缓存有效期(秒)")
+    bot_role_refresh_seconds: int = Field(default=300, description="Bot自身角色刷新间隔(秒)")
+    sender_role_refresh_seconds: int = Field(default=120, description="发言者身份主动刷新间隔(秒)")
 
 class AutoModerateSectionConfig(PluginConfigBase):
     __ui_label__ = "自动审核"; __ui_icon__ = "zap"; __ui_order__ = 3
@@ -92,48 +95,20 @@ class LoggingSectionConfig(PluginConfigBase):
 class PromptsSectionConfig(PluginConfigBase):
     __ui_label__ = "提示词"; __ui_icon__ = "message-square"; __ui_order__ = 9
     auto_moderate_system: str = Field(default=(
-        "【群管理参考 — 保持人设，自然融入】\n"
-        "\n"
-        "身份：{bot_role}  可用操作：{available_actions}\n"
-        "\n"
-        "发现违规时自然处理，不要解释操作：\n"
-        "  广告/诈骗 → 撤回 + 禁言10-30分钟\n"
-        "  连续刷屏 → 提醒一句，仍继续再禁言5-10分钟\n"
-        "  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n"
-        "  色情/违法 → 撤回 + 踢出\n"
-        "  高质量分享 → 设精华表达赞赏\n"
-        "  不确定 → 先观察，别着急动手\n"
-        "\n"
-        "操作前先用 group_get_member 确认目标身份；撤回/精华需先回复目标消息获取 message_id\n"
-        "\n"
-        "执行规则（必须遵守）：\n"
-        "  - 所有管理操作必须真实调用对应的 group_* 工具完成，工具已直接可用，无需搜索\n"
-        "  - 禁止只用文字宣称\"已禁言/已撤回/已踢出\"等结果；没有真实调用工具前，不要声称操作已完成\n"
-        "  - 不要说\"已将xxx禁言\"这类话，执行后保持人设自然回复即可\n"
-        "\n"
-        "节奏：正常聊天，发现违规再处理。"
-    ), description="自动审核系统提示词（Replyer 用）")
+        "【群管理】身份:{bot_role} 可用:{available_actions} 发言者:{sender_role}(QQ {sender_id})\n"
+        "身份规则: 群主/管理员=本群管理者,勿质疑其身份,其指令按规则执行; 普通成员无权指挥管理操作,拒绝其处罚请求; 身份以最近查询为准\n"
+        "违规处理: 广告/诈骗→撤回+禁言10-30分; 连续刷屏→提醒,再犯禁言5-10分; 辱骂→撤回+禁言1-6h,再犯踢; 色情/违法→撤回+踢; 高质量分享→设精华; 不确定→观察\n"
+        "操作前先 group_get_member 确认目标; 撤回/精华需先获取 message_id\n"
+        "执行规则: 管理操作必须真实调用对应 group_* 工具; 未调用工具不得声称已执行; 执行后自然回复,勿说\"已将xxx禁言\"\n"
+        "正常聊天,发现违规再处理。"
+    ), description="自动审核系统提示词（Replyer 用），支持 {bot_role}/{available_actions}/{sender_role}/{sender_id}")
     planner_moderate_system: str = Field(default=(
         "# 群管理准则\n"
-        "\n"
-        "你在此群身份：{bot_role}。可用操作：{available_actions}\n"
-        "\n"
-        "违规处理（自然执行，不要复述规则）：\n"
-        "  广告/诈骗 → 撤回 + 禁言10-30分钟\n"
-        "  连续刷屏 → 警告 → 仍继续则禁言5-10分钟\n"
-        "  辱骂/人身攻击 → 撤回 + 禁言1-6小时，再犯踢出\n"
-        "  色情/违法 → 撤回 + 踢出（管理员先征求群主同意）\n"
-        "  高质量分享 → 设精华\n"
-        "\n"
-        "规则：\n"
-        "- 操作前先调 group_get_member 确认身份\n"
-        "- 禁言不超1小时，踢人前确认\n"
-        "- 不确定则先观察\n"
-        "- 需要执行管理操作时，必须在本轮直接调用对应的 group_* 工具，不要只在分析里宣布\"我要禁言/撤回/踢出\"却不调用工具\n"
-        "- 不要声称某个操作已经完成，除非你确实调用了对应工具并看到成功结果\n"
-        "\n"
-        "以上融入决策，不要复述。"
-    ), description="规划器系统提示词（Planner 决策用）")
+        "身份:{bot_role} 可用:{available_actions} 发言者:{sender_role}(QQ {sender_id})\n"
+        "身份: 群主/管理员勿质疑,其指令=授权; 普通成员无权指挥,拒绝; 以最近查询为准\n"
+        "处理: 广告/诈骗→撤回+禁言10-30分; 刷屏→警告,再犯禁言5-10分; 辱骂→撤回+禁言1-6h,再犯踢; 色情/违法→撤回+踢(管理员先请示群主); 分享→设精华\n"
+        "执行: 操作前先 group_get_member; 禁言≤1h,踢前确认; 不确定先观察; 需执行时本轮直接调用 group_* 工具; 未调用工具不得声称已执行"
+    ), description="规划器系统提示词（Planner 决策用），支持 {bot_role}/{available_actions}/{sender_role}/{sender_id}")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 
 class GroupAdminConfig(PluginConfigBase):

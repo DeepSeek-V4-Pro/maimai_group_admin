@@ -33,6 +33,8 @@ class PluginCore(MaiBotPlugin):
         self._group_roles: dict[int, str] = {}
         self._role_refresh_time: dict[int, float] = {}
         self._known_roles: dict[tuple[int, int], tuple[str, float]] = {}
+        self._last_sender_role_check: dict[tuple[int, int], float] = {}
+        self._stream_sender: dict[str, int] = {}
         self._bot_self_id: Optional[int] = None
         self._stream_to_group: OrderedDict[str, int] = OrderedDict()
         self._disabled_groups: set[int] = set()
@@ -282,6 +284,26 @@ class PluginCore(MaiBotPlugin):
             )
             gid = session_gid
         if gid <= 0:
+            msg = kwargs.get("message", {}) or {}
+            if isinstance(msg, dict):
+                mi = msg.get("message_info", {}) or {}
+                if isinstance(mi, dict):
+                    gi = mi.get("group_info", {}) or {}
+                    gid = self._to_int(gi.get("group_id", 0))
+                    if not gid:
+                        gid = self._to_int(mi.get("group_id", 0))
+                    if not gid:
+                        ac = mi.get("additional_config", {}) or {}
+                        if isinstance(ac, dict):
+                            gid = self._to_int(ac.get("platform_io_target_group_id", 0))
+                if not gid:
+                    gid = self._to_int(msg.get("group_id", 0))
+            if gid:
+                for key in ("stream_id", "session_id"):
+                    sid = str(kwargs.get(key, "") or "")
+                    if sid:
+                        self._cache_stream_group(sid, gid)
+        if gid <= 0:
             return 0
         if not self._is_group_enabled(gid):
             self.ctx.logger.warning(f"[群管理] 工具目标群未启用，已拦截: group={gid}")
@@ -322,7 +344,7 @@ class PluginCore(MaiBotPlugin):
                     del self._warnings[gid][uid]
             if not self._warnings[gid]:
                 del self._warnings[gid]
-        known_ttl = 3600
+        known_ttl = max(self.config.identity.role_cache_ttl_seconds, 60)
         for k in list(self._known_roles.keys()):
             if now - self._known_roles[k][1] > known_ttl:
                 del self._known_roles[k]
@@ -330,6 +352,13 @@ class PluginCore(MaiBotPlugin):
             keys = sorted(self._known_roles.keys(), key=lambda k: self._known_roles[k][1])
             for k in keys[:len(keys) - 1000]:
                 del self._known_roles[k]
+        sender_ttl = max(self.config.identity.sender_role_refresh_seconds, 30) * 6
+        for k in list(self._last_sender_role_check.keys()):
+            if now - self._last_sender_role_check[k] > sender_ttl:
+                del self._last_sender_role_check[k]
+        for sid in list(self._stream_sender.keys()):
+            if not self._lookup_stream_group(sid):
+                del self._stream_sender[sid]
         if len(self._stream_to_group) > _STREAM_CACHE_MAX:
             keys = list(self._stream_to_group.keys())
             for k in keys[:len(keys) - _STREAM_CACHE_KEEP]:
@@ -387,40 +416,108 @@ class PluginCore(MaiBotPlugin):
             if today not in cnt_dict[group_id]:
                 cnt_dict[group_id][today] = 0
 
-    async def _check_target_role(self, group_id: int, user_id: int) -> Optional[str]:
+    async def _check_target_role(self, group_id: int, user_id: int, force_refresh: bool = False) -> Optional[str]:
+        """查询群成员身份（owner/admin/member），带缓存；force_refresh 时强制走 API。"""
         key = (group_id, user_id)
-        if key in self._known_roles:
+        if not force_refresh and key in self._known_roles:
             role, ts = self._known_roles[key]
-            if time.time() - ts < 3600:
+            if time.time() - ts < max(self.config.identity.role_cache_ttl_seconds, 60):
                 return role
         try:
             ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=group_id, user_id=user_id, no_cache=True)
             if ok and isinstance(data, dict):
                 role = data.get("role", "")
-                self._known_roles[key] = (role, time.time())
-                return role
+                if role:
+                    self._known_roles[key] = (role, time.time())
+                    return role
         except Exception as e:
             self.ctx.logger.warning(f"[群管理] 查询用户身份失败: {e}")
         return None
 
-    async def _is_protected(self, group_id: int, user_id: int) -> tuple[bool, str]:
+    async def _refresh_sender_role(self, group_id: int, user_id: int) -> Optional[str]:
+        """主动刷新当前发言者的身份：按 sender_role_refresh_seconds 节流，避免每条消息都打 API。"""
+        if group_id <= 0 or user_id <= 0:
+            return None
+        key = (group_id, user_id)
+        now = time.time()
+        last = self._last_sender_role_check.get(key, 0)
+        interval = max(self.config.identity.sender_role_refresh_seconds, 30)
+        if now - last < interval:
+            role, ts = self._known_roles.get(key, ("", 0))
+            if role:
+                return role
+        self._last_sender_role_check[key] = now
+        role = await self._check_target_role(group_id, user_id, force_refresh=True)
+        if self.config.logging.verbose_logging:
+            self.ctx.logger.info(f"[群管理] 发言者身份刷新: group={group_id} user={user_id} role={role or 'unknown'}")
+        return role
+
+    # ===== 权限决策链 =====
+
+    def _new_permission_chain(self, group_id: int, user_id: int, context: str) -> dict[str, Any]:
+        return {"context": context, "group_id": group_id, "user_id": user_id, "steps": [], "result": None, "reason": ""}
+
+    def _chain_add(self, chain: dict[str, Any], step: str, passed: bool, detail: str = "") -> None:
+        if chain is not None:
+            chain["steps"].append({"step": step, "passed": bool(passed), "detail": detail})
+
+    def _chain_finish(self, chain: dict[str, Any], allowed: bool, reason: str = "") -> dict[str, Any]:
+        if chain is None:
+            return chain
+        chain["result"] = bool(allowed)
+        chain["reason"] = reason
+        if self.config.logging.verbose_logging:
+            lines = [f"[群管理] 权限决策链[{chain['context']}] user={chain['user_id']} group={chain['group_id']}"]
+            for i, s in enumerate(chain["steps"], 1):
+                mark = "✓" if s["passed"] else "✗"
+                lines.append(f"  {i}. [{mark}] {s['step']}" + (f" — {s['detail']}" if s["detail"] else ""))
+            lines.append(f"  结果: {'允许' if allowed else '拒绝'}" + (f" — {reason}" if reason else ""))
+            self.ctx.logger.info("\n".join(lines))
+        else:
+            self.ctx.logger.debug(f"[群管理] 权限决策链[{chain['context']}] user={chain['user_id']} group={chain['group_id']} 结果={'允许' if allowed else '拒绝'} ({reason})")
+        return chain
+
+    def _chain_format_text(self, chain: dict[str, Any]) -> str:
+        """把权限决策链渲染成可读文本，供 /admin perm 输出。"""
+        if chain is None:
+            return "无决策链数据"
+        lines = [f"权限决策链[{chain['context']}] 群 {chain['group_id']} @{chain['user_id']}"]
+        for i, s in enumerate(chain["steps"], 1):
+            mark = "✓" if s["passed"] else "✗"
+            lines.append(f"  {i}. [{mark}] {s['step']}" + (f" — {s['detail']}" if s["detail"] else ""))
+        result = "允许" if chain.get("result") else "拒绝"
+        reason = chain.get("reason") or ""
+        lines.append(f"  结果: {result}" + (f" — {reason}" if reason else ""))
+        return "\n".join(lines)
+
+    async def _is_protected(self, group_id: int, user_id: int, chain: dict[str, Any] | None = None) -> tuple[bool, str]:
+        def add(step: str, passed: bool, detail: str = "") -> None:
+            self._chain_add(chain, step, passed, detail)
         user_str = str(user_id)
         if user_str in self.config.safeguard.protected_users:
+            add("全局保护名单", True, f"{user_str} 命中 protected_users")
             return True, "该用户在全局保护名单中，不能操作"
         group_exempt = self.config.safeguard.exempt_users.get(str(group_id), [])
         if user_str in group_exempt:
+            add("按群豁免名单", True, f"{user_str} 命中 exempt_users[{group_id}]")
             return True, "该用户在本群豁免名单中，不能操作"
         if user_str in self.config.admin.admins:
+            add("bot管理员名单", True, f"{user_str} 在 admin.admins 中")
             return True, "该用户是bot管理员，与群主同级保护"
         if self.config.safeguard.auto_exempt_admins:
             role = await self._check_target_role(group_id, user_id)
             if role in ("owner", "admin"):
+                add("自动豁免群主/管理员", True, f"目标身份={role}")
                 return True, f"目标是本群{role}，系统自动保护"
+            add("自动豁免群主/管理员", False, f"目标身份={role or 'unknown'}")
+        else:
+            add("自动豁免群主/管理员", False, "auto_exempt_admins=false")
         return False, ""
 
     async def _ensure_bot_role(self, group_id: int) -> Optional[str]:
         existing = self._get_group_role(group_id)
-        if existing and (time.time() - self._role_refresh_time.get(group_id, 0) < 1800):
+        refresh_interval = max(self.config.identity.bot_role_refresh_seconds, 60)
+        if existing and (time.time() - self._role_refresh_time.get(group_id, 0) < refresh_interval):
             return existing
         if self.config.identity.auto_detect:
             try:
@@ -440,12 +537,12 @@ class PluginCore(MaiBotPlugin):
                     return role
                 else:
                     self._group_roles[group_id] = "member"
-                    self._role_refresh_time[group_id] = time.time()
+                    self._role_refresh_time[group_id] = time.time() - refresh_interval + 60
                     return "member"
             except Exception as e:
                 self.ctx.logger.warning(f"[群管理] Bot角色检测失败: group={group_id}: {e}")
                 self._group_roles[group_id] = "member"
-                self._role_refresh_time[group_id] = time.time()
+                self._role_refresh_time[group_id] = time.time() - refresh_interval + 60
                 return "member"
         else:
             gid_str = str(group_id)
@@ -573,40 +670,93 @@ class PluginCore(MaiBotPlugin):
             segments.append({"type": "text", "content": suffix})
         await self.ctx.send.hybrid(segments, stream_id)
 
-    def _extract_sender_id(self, kwargs: dict[str, Any]) -> int:
+    def _extract_sender_id(self, kwargs: dict[str, Any], message: Any = None) -> int:
+        """从 kwargs / message 结构中提取发送者 QQ 号（多来源兜底）。"""
         for key in ("user_id", "sender_id", "user"):
             val = kwargs.get(key)
             if val: return self._to_int(val)
+        msg = message if isinstance(message, dict) else (kwargs.get("message") if isinstance(kwargs.get("message"), dict) else None)
+        if msg:
+            for key in ("user_id", "sender_id"):
+                val = msg.get(key)
+                if val: return self._to_int(val)
+            mi = msg.get("message_info", {}) or {}
+            if isinstance(mi, dict):
+                # MaiBot 标准序列化: message_info.user_info.user_id
+                ui = mi.get("user_info", {}) or {}
+                if isinstance(ui, dict):
+                    for key in ("user_id", "sender_id", "uin"):
+                        val = ui.get(key)
+                        if val: return self._to_int(val)
+                # 其他适配器兜底: sender_info
+                si = mi.get("sender_info", {}) or {}
+                if isinstance(si, dict):
+                    for key in ("user_id", "sender_id", "uin"):
+                        val = si.get(key)
+                        if val: return self._to_int(val)
+                for key in ("user_id", "sender_id"):
+                    val = mi.get(key)
+                    if val: return self._to_int(val)
         return 0
 
+    def _cache_stream_sender(self, sid: str, user_id: int) -> None:
+        if sid and user_id > 0:
+            self._stream_sender[sid] = user_id
+
+    def _lookup_stream_sender(self, sid: str) -> int:
+        if not sid:
+            return 0
+        return self._stream_sender.get(sid, 0)
+
     async def _check_admin_permission(self, stream_id: str, group_id: int, user_id: str | int = "", command_text: str = "") -> bool:
+        deny_mode = self.config.admin.deny_response
         sender_str = str(self._to_int(user_id)) if user_id else ""
+        chain = self._new_permission_chain(group_id, self._to_int(sender_str), "命令权限")
         if not sender_str:
+            self._chain_add(chain, "发送者识别", False, "无法从消息中提取QQ号")
+            self._chain_finish(chain, False, "缺少发送者QQ号")
             return False
         admins = self.config.admin.admins
-        deny_mode = self.config.admin.deny_response
         if sender_str in admins:
+            self._chain_add(chain, "全局管理员名单", True, f"{sender_str} 在 admin.admins 中（跨群有效）")
+            self._chain_finish(chain, True, "全局管理员")
             return True
+        self._chain_add(chain, "全局管理员名单", False, f"{sender_str} 不在 admin.admins 中")
         if group_id <= 0:
+            self._chain_add(chain, "群号解析", False, "无法确定当前群号")
             if deny_mode == "reply":
                 await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+            self._chain_finish(chain, False, "无法确定群号")
             return False
         role = await self._check_target_role(group_id, self._to_int(sender_str))
+        self._chain_add(chain, "群成员身份查询", bool(role), f"role={role or 'unknown'}")
         if role == "owner":
             if not self.config.admin.allow_group_owner:
-                pass
+                self._chain_add(chain, "群主授权", False, "allow_group_owner=false")
+                if deny_mode == "reply":
+                    await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+                self._chain_finish(chain, False, "群主未被授权执行命令")
+                return False
             else:
                 allowed = self.config.admin.owner_allowed_commands
                 if not allowed:
+                    self._chain_add(chain, "群主命令白名单", True, "白名单为空=全部可用")
+                    self._chain_finish(chain, True, "群主身份")
                     return True
                 for cmd in allowed:
                     if re.search(r'\b' + re.escape(cmd) + r'\b', command_text):
+                        self._chain_add(chain, "群主命令白名单", True, f"命令命中白名单: {cmd}")
+                        self._chain_finish(chain, True, "群主身份+命令在白名单")
                         return True
+                self._chain_add(chain, "群主命令白名单", False, f"命令不在白名单 {allowed} 中")
                 if deny_mode == "reply":
                     await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+                self._chain_finish(chain, False, "命令不在群主白名单")
                 return False
+        self._chain_add(chain, "群主身份", False, f"role={role or 'unknown'}，仅群主(allow_group_owner=true)或 admin.admins 中的管理员可用")
         if deny_mode == "reply":
             await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+        self._chain_finish(chain, False, "非群主且非全局管理员")
         return False
 
     async def _save_exempt_users(self):
