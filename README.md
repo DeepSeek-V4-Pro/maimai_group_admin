@@ -1,4 +1,4 @@
-# 群管理助手 v2.5 — 给 QQ 群装一个“自动小管理员”
+# 群管理助手 v2.6 — 给 QQ 群装一个“自动小管理员”
 
 **这个插件是干什么的？**
 
@@ -115,7 +115,7 @@ plugins/maimai_group_admin/
   plugin_core.py    # 核心生命周期、后台任务、辅助方法
   config_model.py   # 配置模型（10 个配置分区 + 2 个默认提示词）
   tools.py          # 18 个管理 Tool
-  commands.py       # 15 个管理员命令
+  commands.py       # 29 个命令入口（管理员/群主/普通成员分级权限）
   handlers.py       # 1 个 EventHandler + 5 个 HookHandler
   config.toml       # 配置文件
   __init__.py       # 包初始化
@@ -172,7 +172,7 @@ WebUI → 插件管理 → 找到 `deepseek-v4-pro.maimai-group-admin` → 点�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 插件总开关，设为 `true` 后插件才开始工作 |
-| `config_version` | string | `"2.5.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
+| `config_version` | string | `"2.6.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
 
 ---
 
@@ -184,6 +184,7 @@ WebUI → 插件管理 → 找到 `deepseek-v4-pro.maimai-group-admin` → 点�
 | `allow_group_owner` | bool | `true` | 是否允许目标群的群主执行管理员命令（即使不在 admins 列表中） |
 | `owner_allowed_commands` | list[string] | `[]` | 群主可用的命令白名单（如 `["status","log","mute","kick"]`），留空 = 全部可用。已在权限校验中实际执行 |
 | `deny_response` | string | `"silent"` | 无权限用户的处理方式：`"silent"`=静默忽略，`"reply"`=回复"你没有权限执行此操作" |
+| `allow_member_self_modify` | bool | `false` | 是否允许普通成员通过 `/setmytitle`、`/setmycard` 修改自己的专属头衔和群名片；关闭时按原本权限仅群主/管理员/全局管理员可用 |
 
 > **重要**：`admins` 必须至少填一个 QQ 号，否则仅群主能用管理命令。
 
@@ -407,9 +408,10 @@ Tool 全部 18 个静态注册，始终可用。Bot 角色的影响在 prompt �
 
 ---
 
-### 二、人类管理员命令（15 个）
+### 二、命令入口（29 个）
 
-所有命令需满足权限校验（`config.admin.admins` 或群主身份）。
+所有命令按 QQ 实际能力设置最低权限：`/admin` 系列仅 `config.admin.admins` 或群主可用；
+快捷管理命令允许群主、群管理员或 `admin.admins`；查询类命令按命令分别控制。
 
 #### /admin 控制台（8 个）
 
@@ -423,19 +425,53 @@ Tool 全部 18 个静态注册，始终可用。Bot 角色的影响在 prompt �
 | `/admin perm [@qq|昵称]` | 权限决策链 | 可视化展示被查用户从身份查询 → 管理员/群主授权 → 保护名单 → Bot 角色 的完整判断链，用于排查权限问题 |
 | `/admin ban [群号] @qq` | 添加豁免 | 写入 `exempt_users[群号]` |
 | `/admin unban [群号] @qq` | 移除豁免 | 从 `exempt_users` 删除 |
-#### 快捷操作（7 个）
+#### 快捷管理操作（10 个）
 
 | 命令 | 用法 | 权限 | 安全护栏 |
 |------|------|------|----------|
-| `/mute @qq 5分钟 刷屏` | 禁言，支持 QQ 号或昵称 | admins/群主 | 受保护用户/豁免名单检查 |
-| `/unmute @qq` | 解禁 | admins/群主 | — |
-| `/kick @qq 广告` | 踢出 | admins/群主 | 受保护用户/豁免名单检查 |
-| `/warn @qq spam 原因` | 正式警告 | admins/群主 | — |
-| `/essence` | 设精华（需先回复目标消息） | admins/群主 | — |
-| `/recall` | 撤回（需先回复目标消息） | admins/群主 | — |
-| `/shutlist` | 查看禁言列表 | admins/群主 | — |
+| `/mute @qq 5分钟 刷屏` | 禁言，支持 QQ 号或昵称 | 群主/管理员/全局管理员 | 受保护用户/豁免名单检查 |
+| `/unmute @qq` | 解禁 | 群主/管理员/全局管理员 | — |
+| `/kick @qq 广告` | 踢出 | 群主/管理员/全局管理员 | 受保护用户/豁免名单检查 |
+| `/warn @qq spam 原因` | 正式警告 | 群主/管理员/全局管理员 | — |
+| `/essence` | 设精华（需先回复目标消息） | 群主/管理员/全局管理员 | — |
+| `/unessence` | 取消精华（需先回复目标消息） | 群主/管理员/全局管理员 | — |
+| `/recall` | 撤回（需先回复目标消息） | 群主/管理员/全局管理员 | — |
+| `/card @qq 新名片` | 修改群名片 | 群主/管理员/全局管理员 | 受保护用户/豁免名单检查 |
+| `/shutlist` | 查看禁言列表 | 群主/管理员/全局管理员 | — |
+| `/sysmsg` | 查看入群申请/群系统消息 | 群主/管理员/全局管理员 | — |
 
-> **注意**：`/essence` 和 `/recall` 需要先在 QQ 中**回复（引用）目标消息**，然后再发送命令。命令会自动从回复中提取目标消息的 ID。
+#### 群主专属命令（2 个）
+
+| 命令 | 用法 | 权限 | 说明 |
+|------|------|------|------|
+| `/settitle @qq 头衔` | 设置专属头衔（最长 6 字符） | 群主/全局管理员 | QQ 要求 Bot 为群主 |
+| `/setname 新群名` | 修改群名称 | 群主/全局管理员 | QQ 要求 Bot 为群主 |
+
+#### 公告与审批命令（4 个）
+
+| 命令 | 用法 | 权限 |
+|------|------|------|
+| `/notice 公告内容` | 发布群公告 | 群主/管理员/全局管理员 |
+| `/delnotice notice_id` | 删除群公告 | 群主/管理员/全局管理员 |
+| `/approve request_id [原因]` | 通过入群申请 | 群主/管理员/全局管理员 |
+| `/reject request_id [原因]` | 拒绝入群申请 | 群主/管理员/全局管理员 |
+
+#### 自助修改命令（2 个，受 `admin.allow_member_self_modify` 控制）
+
+| 命令 | 用法 | 默认权限 | 开启开关后 |
+|------|------|----------|------------|
+| `/setmytitle 头衔` | 修改自己的专属头衔 | 群主/全局管理员 | 任意群成员（仍需 Bot 为群主） |
+| `/setmycard 新名片` | 修改自己的群名片 | 群主/管理员/全局管理员 | 任意群成员 |
+
+#### 查询命令（3 个）
+
+| 命令 | 用法 | 权限 |
+|------|------|------|
+| `/mytitle` | 查看自己的专属头衔 | 群主/管理员/全局管理员 |
+| `/member @qq|昵称` | 查看成员身份、昵称、群名片、头衔 | 群主/管理员/全局管理员 |
+| `/notices` | 查看群公告列表 | 任意群成员 |
+
+> **注意**：`/essence`、`/unessence` 和 `/recall` 需要先在 QQ 中**回复（引用）目标消息**，然后再发送命令。命令会自动从回复中提取目标消息的 ID。
 
 ---
 
@@ -643,7 +679,7 @@ max_duration = 1800          # 首次就禁言30分钟
 
 **原因**：v2.4 及更早版本只在调用管理工具时才查询目标身份，对话中 LLM 不知道当前说话人是谁，可能说出"群主是冒充的"之类的话，调用工具后才反应过来。
 
-**解决**：升级到 **v2.5**。v2.5 在每条群消息到达时主动识别发言者身份并注入提示词，LLM 回复前就知道对方是群主/管理员/普通成员；提示词明确要求"不得质疑群主/管理员身份"。身份默认每 2 分钟刷新一次，可在 `[identity] sender_role_refresh_seconds` 调整。
+**解决**：升级到 **v2.5+**。v2.5 在每条群消息到达时主动识别发言者身份并注入提示词，LLM 回复前就知道对方是群主/管理员/普通成员；提示词明确要求"不得质疑群主/管理员身份"。身份默认每 2 分钟刷新一次，可在 `[identity] sender_role_refresh_seconds` 调整。v2.6 额外把发言者昵称/群名片、QQ 号、内部 `person_id` 同时带入提示词，明确要求只认相同 `person_id` 是同一人、工具 `user_id` 只用 QQ 号，可减少模型在 QQ 号、内部 ID、昵称之间串认人。
 
 ### Q: 权限判断异常，如何排查
 
@@ -747,12 +783,12 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ---
 
-## v2.5 功能总览
+## v2.6 功能总览
 
 | 模块 | 数量 | 详情 |
 |------|:---:|------|
 | 管理 Tool | 18 | warn / mute / unmute / kick / recall / set_essence / unset_essence / card / title / name / approve_join / reject_join / post_notice / delete_notice / get_member / get_shut_list / get_system_msg / get_notice |
-| 快捷命令 | 15 | /admin(status\|off\|on\|undo\|log\|perm\|ban\|unban) + /mute / /unmute / /kick / /warn / /essence / /recall / /shutlist |
+| 命令入口 | 29 | /admin(status\|off\|on\|undo\|log\|perm\|ban\|unban) + /mute / /unmute / /kick / /warn / /essence / /unessence / /recall / /shutlist / /mytitle / /member / /notices / /sysmsg / /card / /settitle / /setname / /notice / /delnotice / /approve / /reject / /setmytitle / /setmycard |
 | HookHandler | 5 | chat.receive(缓存) / planner.before_request(Planner注入) / replyer.before_request(extra_prompt) / replyer.before_model_request(messages) / replyer.after_response(守门) |
 | EventHandler | 1 | 追踪（群号映射/计数/角色缓存） |
 | 安全护栏 | 8 步 | protected_users → exempt_users → admins → auto_exempt → mute_cooldown → 每日限额 → kick_confirm → 处罚阶梯 |
@@ -760,7 +796,7 @@ max_duration = 1800          # 首次就禁言30分钟
 | 自动审批 | 支持 | 全局 + 按群独立覆盖（TOML 数组表），关键词过滤 + 每日限额 |
 | 警告系统 | 支持 | spam / abuse / ad 三类，可配阈值和计数窗口 |
 | 处罚阶梯 | 支持 | 按回溯小时数和操作次数自动升级 mute→kick |
-| 角色感知 | 支持 | 自动检测 Bot 角色 + 主动识别当前发言者身份（群主/管理员/普通成员），双身份注入提示词 |
+| 角色感知 | 支持 | 自动检测 Bot 角色 + 主动识别当前发言者身份（群主/管理员/普通成员），注入 QQ/昵称/群名片/内部 person_id |
 | 权限决策链 | 支持 | `/admin perm` 可视化 + verbose 日志输出完整判断链，方便排查权限问题 |
 | 身份缓存刷新 | 高频 | Bot 角色 5 分钟、发言者 2 分钟、目标身份 10 分钟，均可在 `[identity]` 配置 |
 | 并发安全 | asyncio.Lock | 所有 Tool 和后台任务共享一把锁 |

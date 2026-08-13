@@ -1,4 +1,4 @@
-"""群管理助手 — 15 个管理员命令"""
+"""群管理助手 — 29 个命令入口"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from maibot_sdk import Command
 
 
 class CommandMixin:
-    """15 个管理员命令（8 个 /admin 系列 + 7 个快捷操作）。"""
+    """29 个命令入口（8 个 /admin 系列 + 21 个功能命令）。"""
 
     # =========================================================================
     # Command: /admin 系列 (8个)
@@ -229,7 +229,7 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-mute: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         target = (matched.get("target") or "").strip(); duration = int(matched.get("duration", 0) or 0)
         unit = (matched.get("unit") or "分钟").strip(); reason = (matched.get("reason") or "").strip()
         if not target or duration <= 0: await self.ctx.send.text("用法: /mute @qq或昵称 N分钟 [原因]", stream_id); return True, "", True
@@ -276,7 +276,7 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-admin-unmute: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         target = (matched.get("target") or "").strip()
         if not target: await self.ctx.send.text("用法: /unmute @qq或昵称", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
@@ -291,7 +291,7 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-kick: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         target = (matched.get("target") or "").strip(); reason = (matched.get("reason") or "").strip()
         if not target: await self.ctx.send.text("用法: /kick @qq或昵称 [原因]", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
@@ -321,7 +321,7 @@ class CommandMixin:
         self.ctx.logger.info(f"[群管理] Cmd-warn: stream={stream_id}")
         matched = matched_groups or {}
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         target = (matched.get("target") or "").strip(); vtype = (matched.get("type") or "").strip(); reason = (matched.get("reason") or "").strip()
         if not target or not vtype: await self.ctx.send.text("用法: /warn @qq或昵称 spam/abuse/ad [原因]", stream_id); return True, "", True
         qq = await self._resolve_target(gid, target, stream_id)
@@ -352,7 +352,7 @@ class CommandMixin:
     async def cmd_admin_essence(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
         self.ctx.logger.info(f"[群管理] Cmd-essence: stream={stream_id}")
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         msg_id = self._get_reply_msg_id(kwargs)
         if not msg_id: await self.ctx.send.text("请先回复目标消息再使用 /essence", stream_id); return True, "", True
         ok, _ = await self._call_action_api(api_name="adapter.napcat.group.set_essence_msg", group_id=gid, message_id=msg_id)
@@ -363,7 +363,7 @@ class CommandMixin:
     async def cmd_admin_recall(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
         self.ctx.logger.info(f"[群管理] Cmd-recall: stream={stream_id}")
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         msg_id = self._get_reply_msg_id(kwargs)
         if not msg_id: await self.ctx.send.text("请先回复目标消息再使用 /recall", stream_id); return True, "", True
         ok, _ = await self._call_api(api_name="adapter.napcat.message.delete_msg", message_id=msg_id)
@@ -374,7 +374,7 @@ class CommandMixin:
     async def cmd_admin_shutlist(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
         self.ctx.logger.info(f"[群管理] Cmd-shutlist: stream={stream_id}")
         gid = self._resolve_group_id(stream_id, kwargs)
-        if not await self._check_admin_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or "")): return True, "", True
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
         ok, data = await self._call_action_api(api_name="adapter.napcat.group.get_group_shut_list", group_id=gid)
         if ok and isinstance(data, dict):
             shut_list = data.get("data", data)
@@ -389,4 +389,232 @@ class CommandMixin:
             else:
                 await self.ctx.send.text(f"群 {gid} 当前没有被禁言的用户", stream_id)
         else: await self.ctx.send.text("查询未能生效，请稍后重试", stream_id)
+        return True, "", True
+
+    # =========================================================================
+    # Command: 全功能指令入口（按 QQ 实际权限设置最低要求）
+    # =========================================================================
+
+    @Command("member_title", description="查看自己的群专属头衔: /mytitle", pattern=r"^/mytitle$")
+    async def cmd_member_title(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-mytitle: stream={stream_id}")
+        gid = self._resolve_group_id(stream_id, kwargs)
+        min_role = "admin"
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role=min_role): return True, "", True
+        qq = self._to_int(user_id)
+        if not qq:
+            await self.ctx.send.text("无法识别当前用户", stream_id)
+            return True, "", True
+        title = await self._get_member_title(gid, qq)
+        await self.ctx.send.text(f"你当前在群 {gid} 的专属头衔是：{title or '（未设置）'}", stream_id)
+        return True, "", True
+
+    @Command("member_info", description="查询群成员身份/昵称/群名片/头衔: /member @qq|昵称", pattern=r"^/member\s+@?(?P<target>\S+)")
+    async def cmd_member_info(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-member: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        min_role = "admin"
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role=min_role): return True, "", True
+        target = (matched.get("target") or "").strip()
+        if not target:
+            await self.ctx.send.text("用法: /member @qq或昵称", stream_id)
+            return True, "", True
+        qq = await self._resolve_target(gid, target, stream_id)
+        if not qq:
+            return True, "", True
+        ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=gid, user_id=qq, no_cache=True)
+        if ok and isinstance(data, dict):
+            role = data.get("role", "unknown")
+            nick = data.get("nickname", "")
+            card = data.get("card", "")
+            title = data.get("title") or data.get("special_title") or await self._get_member_title(gid, qq)
+            role_cn = {"owner": "群主", "admin": "管理员", "member": "普通成员"}.get(role, role)
+            lines = [f"@{qq} 成员信息：", f"昵称：{nick}", f"群名片：{card or '（未设置）'}", f"身份：{role_cn}({role})", f"专属头衔：{title or '（未设置）'}"]
+            await self.ctx.send.text("\n".join(lines), stream_id)
+        else:
+            await self.ctx.send.text(f"未找到成员 @{qq} 的信息", stream_id)
+        return True, "", True
+
+    @Command("notice_list", description="查看群公告列表: /notices", pattern=r"^/notices$")
+    async def cmd_notice_list(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-notices: stream={stream_id}")
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="member"): return True, "", True
+        result = await self.tool_get_notice(group_id=gid, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "查询失败")), stream_id)
+        return True, "", True
+
+    @Command("system_msg", description="查看群系统消息/入群申请: /sysmsg", pattern=r"^/sysmsg$")
+    async def cmd_system_msg(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-sysmsg: stream={stream_id}")
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        result = await self.tool_get_system_msg(group_id=gid, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "查询失败")), stream_id)
+        return True, "", True
+
+    @Command("set_member_card", description="修改群成员名片: /card @qq|昵称 新名片", pattern=r"^/card\s+@?(?P<target>\S+)\s+(?P<card>.+)$")
+    async def cmd_set_member_card(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-card: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        target = (matched.get("target") or "").strip()
+        card = (matched.get("card") or "").strip()
+        if not target or not card:
+            await self.ctx.send.text("用法: /card @qq或昵称 新名片", stream_id)
+            return True, "", True
+        qq = await self._resolve_target(gid, target, stream_id)
+        if not qq:
+            return True, "", True
+        result = await self.tool_set_user_card(group_id=gid, user_id=qq, card=card, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "修改失败")), stream_id)
+        return True, "", True
+
+    @Command("set_member_title", description="设置专属头衔（仅群主）: /settitle @qq|昵称 头衔", pattern=r"^/settitle\s+@?(?P<target>\S+)\s+(?P<title>.+)$")
+    async def cmd_set_member_title(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-settitle: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="owner"): return True, "", True
+        target = (matched.get("target") or "").strip()
+        title = (matched.get("title") or "").strip()
+        if not target or not title:
+            await self.ctx.send.text("用法: /settitle @qq或昵称 头衔", stream_id)
+            return True, "", True
+        qq = await self._resolve_target(gid, target, stream_id)
+        if not qq:
+            return True, "", True
+        result = await self.tool_set_title(group_id=gid, user_id=qq, title=title, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "设置失败")), stream_id)
+        return True, "", True
+
+    @Command("set_group_name", description="修改群名称（仅群主）: /setname 新群名", pattern=r"^/setname\s+(?P<name>.+)$")
+    async def cmd_set_group_name(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-setname: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="owner"): return True, "", True
+        name = (matched.get("name") or "").strip()
+        if not name:
+            await self.ctx.send.text("用法: /setname 新群名", stream_id)
+            return True, "", True
+        result = await self.tool_set_name(group_id=gid, name=name, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "修改失败")), stream_id)
+        return True, "", True
+
+    @Command("post_notice", description="发布群公告: /notice 公告内容", pattern=r"^/notice\s+(?P<content>.+)$")
+    async def cmd_post_notice(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-notice: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        content = (matched.get("content") or "").strip()
+        if not content:
+            await self.ctx.send.text("用法: /notice 公告内容", stream_id)
+            return True, "", True
+        result = await self.tool_post_notice(group_id=gid, content=content, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "发布失败")), stream_id)
+        return True, "", True
+
+    @Command("delete_notice", description="删除群公告: /delnotice notice_id", pattern=r"^/delnotice\s+(?P<notice_id>\S+)")
+    async def cmd_delete_notice(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-delnotice: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        notice_id = (matched.get("notice_id") or "").strip()
+        if not notice_id:
+            await self.ctx.send.text("用法: /delnotice notice_id", stream_id)
+            return True, "", True
+        result = await self.tool_delete_notice(group_id=gid, notice_id=notice_id, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "删除失败")), stream_id)
+        return True, "", True
+
+    @Command("approve_join", description="通过入群申请: /approve request_id [原因]", pattern=r"^/approve\s+(?P<request_id>\S+)\s*(?P<reason>.*)$")
+    async def cmd_approve_join(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-approve: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        request_id = (matched.get("request_id") or "").strip()
+        reason = (matched.get("reason") or "").strip()
+        if not request_id:
+            await self.ctx.send.text("用法: /approve request_id [原因]", stream_id)
+            return True, "", True
+        result = await self.tool_approve_join(group_id=gid, request_id=request_id, reason=reason, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "审批失败")), stream_id)
+        return True, "", True
+
+    @Command("reject_join", description="拒绝入群申请: /reject request_id [原因]", pattern=r"^/reject\s+(?P<request_id>\S+)\s*(?P<reason>.*)$")
+    async def cmd_reject_join(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-reject: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        request_id = (matched.get("request_id") or "").strip()
+        reason = (matched.get("reason") or "").strip() or "管理员拒绝"
+        if not request_id:
+            await self.ctx.send.text("用法: /reject request_id [原因]", stream_id)
+            return True, "", True
+        result = await self.tool_reject_join(group_id=gid, request_id=request_id, reason=reason, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "审批失败")), stream_id)
+        return True, "", True
+
+    @Command("unset_essence", description="取消精华: 回复消息后 /unessence", pattern=r"^/unessence$")
+    async def cmd_unset_essence(self, stream_id: str = "", user_id: str = "", **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-unessence: stream={stream_id}")
+        gid = self._resolve_group_id(stream_id, kwargs)
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role="admin"): return True, "", True
+        msg_id = self._get_reply_msg_id(kwargs)
+        if not msg_id:
+            await self.ctx.send.text("请先回复目标消息再使用 /unessence", stream_id)
+            return True, "", True
+        result = await self.tool_unset_essence(group_id=gid, message_id=msg_id, stream_id=stream_id)
+        await self.ctx.send.text(str(result.get("content", "取消精华失败")), stream_id)
+        return True, "", True
+
+    @Command("self_set_title", description="修改自己的专属头衔: /setmytitle 头衔", pattern=r"^/setmytitle\s+(?P<title>.+)$")
+    async def cmd_self_set_title(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-setmytitle: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        min_role = "member" if self.config.admin.allow_member_self_modify else "owner"
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role=min_role): return True, "", True
+        qq = self._to_int(user_id)
+        title = (matched.get("title") or "").strip()
+        if not qq or not title:
+            await self.ctx.send.text("用法: /setmytitle 头衔（只能修改自己）", stream_id)
+            return True, "", True
+        bot_role = await self._ensure_bot_role(gid)
+        if bot_role != "owner":
+            await self.ctx.send.text("设置专属头衔需要 Bot 是本群群主", stream_id)
+            return True, "", True
+        ok, data = await self._call_action_api(api_name="adapter.napcat.group.set_group_special_title", group_id=gid, user_id=qq, special_title=title)
+        if ok:
+            self._mark_tool_executed(gid, "title")
+            await self.ctx.send.text(f"已将你的专属头衔设为「{title}」", stream_id)
+        else:
+            await self.ctx.send.text(f"设置专属头衔失败：{data}", stream_id)
+        return True, "", True
+
+    @Command("self_set_card", description="修改自己的群名片: /setmycard 新名片", pattern=r"^/setmycard\s+(?P<card>.+)$")
+    async def cmd_self_set_card(self, stream_id: str = "", user_id: str = "", matched_groups: dict | None = None, **kwargs: Any):
+        self.ctx.logger.info(f"[群管理] Cmd-setmycard: stream={stream_id}")
+        matched = matched_groups or {}
+        gid = self._resolve_group_id(stream_id, kwargs)
+        min_role = "member" if self.config.admin.allow_member_self_modify else "admin"
+        if not await self._check_command_permission(stream_id, gid, user_id, command_text=str(kwargs.get("text", "") or ""), minimum_role=min_role): return True, "", True
+        qq = self._to_int(user_id)
+        card = (matched.get("card") or "").strip()
+        if not qq or not card:
+            await self.ctx.send.text("用法: /setmycard 新名片（只能修改自己）", stream_id)
+            return True, "", True
+        ok, data = await self._call_action_api(api_name="adapter.napcat.group.set_group_card", group_id=gid, user_id=qq, card=card)
+        if ok:
+            self._mark_tool_executed(gid, "card")
+            await self.ctx.send.text(f"已将你的群名片改为「{card}」", stream_id)
+        else:
+            await self.ctx.send.text(f"修改群名片失败：{data}", stream_id)
         return True, "", True

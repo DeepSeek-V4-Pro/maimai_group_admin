@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import time
@@ -35,6 +36,7 @@ class PluginCore(MaiBotPlugin):
         self._known_roles: dict[tuple[int, int], tuple[str, float]] = {}
         self._last_sender_role_check: dict[tuple[int, int], float] = {}
         self._stream_sender: dict[str, int] = {}
+        self._stream_sender_identity: dict[str, dict[str, Any]] = {}
         self._bot_self_id: Optional[int] = None
         self._stream_to_group: OrderedDict[str, int] = OrderedDict()
         self._disabled_groups: set[int] = set()
@@ -359,6 +361,9 @@ class PluginCore(MaiBotPlugin):
         for sid in list(self._stream_sender.keys()):
             if not self._lookup_stream_group(sid):
                 del self._stream_sender[sid]
+        for sid in list(self._stream_sender_identity.keys()):
+            if not self._lookup_stream_group(sid):
+                del self._stream_sender_identity[sid]
         if len(self._stream_to_group) > _STREAM_CACHE_MAX:
             keys = list(self._stream_to_group.keys())
             for k in keys[:len(keys) - _STREAM_CACHE_KEEP]:
@@ -648,8 +653,11 @@ class PluginCore(MaiBotPlugin):
         if target.isdigit(): return int(target)
         try:
             ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_list", group_id=gid)
-            if ok and isinstance(data, list):
-                for m in data:
+            members = data
+            if isinstance(data, dict):
+                members = data.get("data", data)
+            if ok and isinstance(members, list):
+                for m in members:
                     if not isinstance(m, dict): continue
                     nick = str(m.get("nickname", ""))
                     card = str(m.get("card", ""))
@@ -660,6 +668,47 @@ class PluginCore(MaiBotPlugin):
             self.ctx.logger.warning(f"[群管理] 通过昵称查找成员失败: group={gid} target={target}: {e}")
         await self.ctx.send.text(f"未找到成员: {target} (请使用QQ号)", stream_id)
         return 0
+
+    async def _get_member_title(self, group_id: int, user_id: int) -> str:
+        """查询指定群成员当前佩戴的专属头衔。
+
+        优先使用单个成员接口；部分 NapCat 版本的单成员接口可能返回空 title，
+        因此再回退到成员列表接口查找。
+        """
+        if group_id <= 0 or user_id <= 0:
+            return ""
+        title_keys = ("title", "special_title")
+        ok, data = await self._call_api(
+            api_name="adapter.napcat.group.get_group_member_info",
+            group_id=group_id,
+            user_id=user_id,
+            no_cache=True,
+        )
+        if ok and isinstance(data, dict):
+            for key in title_keys:
+                value = str(data.get(key, "") or "").strip()
+                if value:
+                    return value
+
+        ok2, data2 = await self._call_api(
+            api_name="adapter.napcat.group.get_group_member_list",
+            group_id=group_id,
+        )
+        if ok2:
+            members = data2
+            if isinstance(data2, dict):
+                members = data2.get("data", data2)
+            if isinstance(members, list):
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    if self._to_int(member.get("user_id", 0)) != user_id:
+                        continue
+                    for key in title_keys:
+                        value = str(member.get(key, "") or "").strip()
+                        if value:
+                            return value
+        return ""
 
     async def _send_at_text(self, stream_id: str, prefix: str, qq: int, suffix: str = ""):
         segments = []
@@ -699,6 +748,50 @@ class PluginCore(MaiBotPlugin):
                     if val: return self._to_int(val)
         return 0
 
+    def _extract_sender_identity(self, kwargs: dict[str, Any], message: Any = None) -> dict[str, Any]:
+        """提取发送者身份信息，供提示词展示昵称/群名片并强调工具必须使用 QQ 号。"""
+        qq = self._extract_sender_id(kwargs, message)
+        nickname = ""
+        card = ""
+        platform = str(kwargs.get("platform", "") or "")
+
+        for key in ("user_nickname", "nickname"):
+            val = kwargs.get(key)
+            if val:
+                nickname = str(val)
+                break
+        for key in ("user_cardname", "card"):
+            val = kwargs.get(key)
+            if val:
+                card = str(val)
+                break
+
+        msg = message if isinstance(message, dict) else (kwargs.get("message") if isinstance(kwargs.get("message"), dict) else None)
+        if msg:
+            platform = str(msg.get("platform", "") or platform)
+            mi = msg.get("message_info", {}) or {}
+            if isinstance(mi, dict):
+                ui = mi.get("user_info", {}) or mi.get("sender_info", {}) or {}
+                if isinstance(ui, dict):
+                    nickname = nickname or str(ui.get("user_nickname", ui.get("nickname", "")) or "")
+                    card = card or str(ui.get("user_cardname", ui.get("card", "")) or "")
+        if not nickname:
+            nickname = str(qq) if qq else ""
+        display_name = card or nickname or (str(qq) if qq else "未知用户")
+        if "-" in platform:
+            platform = platform.split("-", 1)[1]
+        person_id = ""
+        if platform and qq:
+            person_id = hashlib.md5(f"{platform}_{qq}".encode()).hexdigest()
+        return {
+            "qq": qq,
+            "platform": platform,
+            "person_id": person_id,
+            "nickname": nickname,
+            "card": card,
+            "display_name": display_name,
+        }
+
     def _cache_stream_sender(self, sid: str, user_id: int) -> None:
         if sid and user_id > 0:
             self._stream_sender[sid] = user_id
@@ -707,6 +800,15 @@ class PluginCore(MaiBotPlugin):
         if not sid:
             return 0
         return self._stream_sender.get(sid, 0)
+
+    def _cache_stream_sender_identity(self, sid: str, identity: dict[str, Any]) -> None:
+        if sid and identity and identity.get("qq", 0) > 0:
+            self._stream_sender_identity[sid] = identity
+
+    def _lookup_stream_sender_identity(self, sid: str) -> dict[str, Any]:
+        if not sid:
+            return {}
+        return self._stream_sender_identity.get(sid, {})
 
     async def _check_admin_permission(self, stream_id: str, group_id: int, user_id: str | int = "", command_text: str = "") -> bool:
         deny_mode = self.config.admin.deny_response
@@ -757,6 +859,93 @@ class PluginCore(MaiBotPlugin):
         if deny_mode == "reply":
             await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
         self._chain_finish(chain, False, "非群主且非全局管理员")
+        return False
+
+    async def _check_command_permission(
+        self,
+        stream_id: str,
+        group_id: int,
+        user_id: str | int = "",
+        command_text: str = "",
+        *,
+        minimum_role: str = "admin",
+    ) -> bool:
+        """按命令最低权限校验发送者。
+
+        minimum_role:
+            member - 任意已解析群会话中的成员
+            admin  - 群主、群管理员，或全局管理员
+            owner  - 群主或全局管理员
+        """
+        deny_mode = self.config.admin.deny_response
+        sender_str = str(self._to_int(user_id)) if user_id else ""
+        chain = self._new_permission_chain(group_id, self._to_int(sender_str), "命令权限")
+        if not sender_str:
+            self._chain_add(chain, "发送者识别", False, "无法从消息中提取QQ号")
+            self._chain_finish(chain, False, "缺少发送者QQ号")
+            if deny_mode == "reply":
+                await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+            return False
+
+        if minimum_role == "member" and group_id <= 0:
+            self._chain_add(chain, "群号解析", False, "群成员命令需要在群聊中使用")
+            self._chain_finish(chain, False, "无法确定群号")
+            if deny_mode == "reply":
+                await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+            return False
+
+        admins = self.config.admin.admins
+        if sender_str in admins:
+            self._chain_add(chain, "全局管理员名单", True, f"{sender_str} 在 admin.admins 中（跨群有效）")
+            self._chain_finish(chain, True, "全局管理员")
+            return True
+
+        if group_id <= 0:
+            self._chain_add(chain, "群号解析", False, "无法确定当前群号")
+            self._chain_finish(chain, False, "无法确定群号")
+            if deny_mode == "reply":
+                await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+            return False
+
+        role = await self._check_target_role(group_id, self._to_int(sender_str))
+        self._chain_add(chain, "群成员身份查询", bool(role), f"role={role or 'unknown'}")
+
+        if minimum_role == "member":
+            self._chain_finish(chain, True, "群内成员可查询")
+            return True
+
+        if role == "owner":
+            if not self.config.admin.allow_group_owner:
+                self._chain_add(chain, "群主授权", False, "allow_group_owner=false")
+                self._chain_finish(chain, False, "群主未被授权执行命令")
+                if deny_mode == "reply":
+                    await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+                return False
+            allowed = self.config.admin.owner_allowed_commands
+            if not allowed:
+                self._chain_add(chain, "群主命令白名单", True, "白名单为空=全部可用")
+                self._chain_finish(chain, True, "群主身份")
+                return True
+            for cmd in allowed:
+                if re.search(r'\b' + re.escape(cmd) + r'\b', command_text):
+                    self._chain_add(chain, "群主命令白名单", True, f"命令命中白名单: {cmd}")
+                    self._chain_finish(chain, True, "群主身份+命令在白名单")
+                    return True
+            self._chain_add(chain, "群主命令白名单", False, f"命令不在白名单 {allowed} 中")
+            self._chain_finish(chain, False, "命令不在群主白名单")
+            if deny_mode == "reply":
+                await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
+            return False
+
+        if minimum_role == "admin" and role == "admin":
+            self._chain_add(chain, "群管理员身份", True, "群管理员可执行该命令")
+            self._chain_finish(chain, True, "群管理员")
+            return True
+
+        self._chain_add(chain, "最低权限", False, f"需要 {minimum_role}，当前 role={role or 'unknown'}")
+        self._chain_finish(chain, False, "权限不足")
+        if deny_mode == "reply":
+            await self.ctx.send.text(self.config.prompts.command_denied_message, stream_id)
         return False
 
     async def _save_exempt_users(self):

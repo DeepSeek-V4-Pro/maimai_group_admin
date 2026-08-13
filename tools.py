@@ -445,9 +445,11 @@ class ToolMixin:
                 ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=group_id, user_id=user_id, no_cache=True)
                 if ok and isinstance(data, dict):
                     role = data.get("role", "unknown"); card = data.get("card", ""); nick = data.get("nickname", "")
+                    title = str(data.get("title", data.get("special_title", "")) or "")
                     self._known_roles[(group_id, user_id)] = (role, time.time())
                     role_cn = {"owner": "群主", "admin": "管理员", "member": "普通成员"}.get(role, role)
-                    return {"name": "group_get_member", "content": f"@{user_id}: 昵称={nick}, 群名片={card}, 身份={role_cn}({role})"}
+                    title_text = f", 专属头衔={title}" if title else ""
+                    return {"name": "group_get_member", "content": f"@{user_id}: 昵称={nick}, 群名片={card}, 身份={role_cn}({role}){title_text}"}
                 return {"name": "group_get_member", "content": f"未找到 @{user_id} 的信息"}
             except Exception:
                 self.ctx.logger.error(f"[群管理] Tool-get-member 异常: group={group_id} user={user_id}", exc_info=True)

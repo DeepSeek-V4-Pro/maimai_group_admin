@@ -1,5 +1,27 @@
 # 更新日志
 
+### v2.6.0 (2026-08-13)
+
+**全功能命令入口 + QQ 身份映射优化**
+
+**功能新增（13 项）**
+- 为全部 18 个管理 Tool 补齐命令入口：新增 `/mytitle`、`/member`、`/notices`、`/sysmsg`、`/card`、`/settitle`、`/setname`、`/notice`、`/delnotice`、`/approve`、`/reject`、`/unessence`、`/setmytitle`、`/setmycard`；原有 `/mute`、`/unmute`、`/kick`、`/warn`、`/essence`、`/recall`、`/shutlist` 继续可用。
+- 命令权限改为按 QQ 实际能力分级：群管理员可执行常规管理命令；群名和专属头衔仍仅群主或全局管理员可用。
+- 新增 `admin.allow_member_self_modify` 开关（默认关闭）：开启后普通成员可通过 `/setmytitle`、`/setmycard` 修改自己的专属头衔和群名片，且命令强制目标只能是发送者本人，保持原有权限逻辑不变。
+- `/mytitle` 普通成员可查询自己的专属头衔；单个成员接口查不到时自动回退到群成员列表接口，兼容部分 NapCat 版本 `title` 字段为空的问题。
+- `/member` 一次展示成员 QQ、昵称、群名片、身份和专属头衔。
+
+**身份识别与提示词（2 项）**
+- EventHandler / HookHandler 现在额外缓存发言者的昵称与群名片，并在 Replyer/Planner 管理提示词中展示。
+- 提示词新增强约束：调用 `group_*` 工具时 `user_id` 必须使用 QQ 号，不能使用昵称、群名片、内部 ID 或记忆中的名字，降低模型串认人概率。
+- 提示词新增强身份锁定禁令：当前身份只对本条消息有效，不要从历史对话推断或跨轮次锁定群主/管理员；日常聊天不确定身份时用昵称/群名片称呼。
+- 提示词补充内部 `person_id` 映射：当前发言者同时给出 QQ 号和 `person_id`，要求模型只把相同 `person_id` 视为同一人，避免仅凭昵称/群名片把不同人串用。
+
+**其他**
+- 成员昵称解析兼容 NapCat 返回 `{data: [...]}` 或直接列表两种格式。
+- `group_get_member` 返回内容补充专属头衔字段。
+- 版本号迭代至 2.6.0（manifest / config_version / README / CHANGELOG 同步更新）。
+
 ### v2.5.0 (2026-08-08)
 
 **对话身份识别 + 高频缓存刷新 + 权限决策链可视化 + 提示词优化**
