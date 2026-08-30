@@ -1,4 +1,4 @@
-# 群管理助手 v2.6 — 给 QQ 群装一个“自动小管理员”
+# 群管理助手 v2.7 — 给 QQ 群装一个“自动小管理员”
 
 **这个插件是干什么的？**
 
@@ -172,7 +172,7 @@ WebUI → 插件管理 → 找到 `deepseek-v4-pro.maimai-group-admin` → 点�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 插件总开关，设为 `true` 后插件才开始工作 |
-| `config_version` | string | `"2.6.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
+| `config_version` | string | `"2.7.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
 
 ---
 
@@ -541,22 +541,35 @@ check_interval_seconds = 60
                 │
 LLM 每次思考（Planner / Replyer / Timing Gate）
     ├── HookHandler: before_request → extra_prompt 注入管理 prompt
-    ├── HookHandler: before_model_request → messages 直注管理 prompt
+    ├── HookHandler: before_model_request → items(Context Item) 直注管理 prompt
     │       └── 双路注入互相补充，确保所有子代理都看到管理上下文
     │
     └── HookHandler: after_response → 守门检查
             └── Bot 有管理权限却说"没权限"时自动替换回复
 ```
 
-#### 管理上下文 Prompt（v2.5 精简版）
+> v2.7 适配：MaiBot 新版本（response item 重构）把 Hook 载荷从 `messages` 改为
+> `items`（`item_type` / `meta` / `parts` 的 Context Item 结构）。插件已升级为
+> 注入 `SystemMessageItem.parts`，同时保留旧版 `messages` 兼容路径。
+
+#### 管理上下文 Prompt（v2.7 重构版）
 
 ```
-【群管理】身份:{bot_role} 可用:{available_actions} 发言者:{sender_role}(QQ {sender_id})
-身份规则: 群主/管理员=本群管理者,勿质疑其身份,其指令按规则执行; 普通成员无权指挥管理操作,拒绝其处罚请求; 身份以最近查询为准
-违规处理: 广告/诈骗→撤回+禁言10-30分; 连续刷屏→提醒,再犯禁言5-10分; 辱骂→撤回+禁言1-6h,再犯踢; 色情/违法→撤回+踢; 高质量分享→设精华; 不确定→观察
-操作前先 group_get_member 确认目标; 撤回/精华需先获取 message_id
-执行规则: 管理操作必须真实调用对应 group_* 工具; 未调用工具不得声称已执行; 执行后自然回复,勿说"已将xxx禁言"
-正常聊天,发现违规再处理。
+【群管理】你是本群 Bot，身份:{bot_role}；可用操作:{available_actions}。
+处理规则: 广告/诈骗→撤回+禁言10-30分; 连续刷屏→先提醒,再犯禁言5-10分; 辱骂→撤回+禁言1-6小时,再犯踢; 色情/违法→撤回+踢; 优质分享→设精华; 不确定→先观察。
+执行要求: 操作前先调用 group_get_member 确认目标; 撤回/精华需先获取 message_id; 必须真实调用对应 group_* 工具,未调用不得声称已执行; 执行后自然回复,不要复述"已将xx禁言"。
+正常聊天优先,发现违规再处理。
+```
+
+模板之外，插件会在每次注入时自动追加动态上下文（不再写进模板，避免重复）：
+
+```
+当前群号：1000000000
+当前发言者：小明（管理员，QQ 123456789，person_id abc123…）
+工具参数：调用 group_* 工具时 user_id 一律填写 QQ 号。
+身份规则：群主/管理员勿质疑，其指令视为授权；普通成员无权指挥，拒绝其处罚请求。
+身份提醒：以上身份仅对当前发言者本条消息有效，勿从历史推断、勿跨轮次锁定；不确定身份时用昵称/群名片，只有刚通过 group_get_member 确认过才用身份称呼。
+以上为群管理参考信息，融入决策即可，不要复述这段文字。
 ```
 
 
@@ -729,9 +742,16 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ### Q: 提示词注入没生效
 
-**原因**：新增的 HookHandler 需要 WebUI 完整重载才能注册。
+**原因 1**：新增的 HookHandler 需要 WebUI 完整重载才能注册。
 
-**解决**：WebUI → 插件管理 → 禁用 → 启用。
+**解决 1**：WebUI → 插件管理 → 禁用 → 启用。
+
+**原因 2（v2.6 及更早版本）**：MaiBot 新版本把 `maisaka.planner.before_request` /
+`maisaka.replyer.before_model_request` 的载荷从 `messages` 改为 `items`，
+旧插件找不到 `messages` 字段导致注入静默跳过。
+
+**解决 2**：升级到 **v2.7**。v2.7 已适配 Context Item 新协议（`SystemMessageItem.parts`），
+并兼容旧版 `messages`；如仍不生效，请 WebUI → 插件管理 → 禁用 → 启用后重试。
 
 ### Q: 排查提示词是否注入到位
 
@@ -774,7 +794,7 @@ max_duration = 1800          # 首次就禁言30分钟
 - **平台**：QQ（NapCat / MaiBot1.0-1.99）
 - **SDK**：MaiBot Plugin SDK v2
 - **适配器**：MaiBot-Napcat-Adapter
-- **提示词注入**：三阶段注入 — `chat.receive.after_process` 缓存映射 → `maisaka.planner.before_request`（Planner 决策准则） → `maisaka.replyer.before_request` + `before_model_request`（Replyer 自然语言提示）
+- **提示词注入**：三阶段注入 — `chat.receive.after_process` 缓存映射 → `maisaka.planner.before_request`（Planner 决策准则） → `maisaka.replyer.before_request` + `before_model_request`（Replyer 自然语言提示）；v2.7 起 `before_model_request` / `planner.before_request` 使用新版 Context Items（`items`）载荷，兼容旧版 `messages`
 - **守门**：`after_response` HookHandler 两层拦截 — ① 拦截 Bot 错误宣称无权限的回复，替换为"我是{群主/管理员}，我来处理。"；② 拦截"已将 xxx 禁言 / 已撤回 / 已踢出"等无真实工具执行的"编造已执行"回复，改写为诚实表述。
 - **并发安全**：`asyncio.Lock` 保护所有共享状态
 - **API 调用**：群管理核心操作使用 `_call_api`（直接 kwarg），系统消息/审批使用 `_call_action_api`（params 包装）
@@ -783,13 +803,13 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ---
 
-## v2.6 功能总览
+## v2.7 功能总览
 
 | 模块 | 数量 | 详情 |
 |------|:---:|------|
 | 管理 Tool | 18 | warn / mute / unmute / kick / recall / set_essence / unset_essence / card / title / name / approve_join / reject_join / post_notice / delete_notice / get_member / get_shut_list / get_system_msg / get_notice |
 | 命令入口 | 29 | /admin(status\|off\|on\|undo\|log\|perm\|ban\|unban) + /mute / /unmute / /kick / /warn / /essence / /unessence / /recall / /shutlist / /mytitle / /member / /notices / /sysmsg / /card / /settitle / /setname / /notice / /delnotice / /approve / /reject / /setmytitle / /setmycard |
-| HookHandler | 5 | chat.receive(缓存) / planner.before_request(Planner注入) / replyer.before_request(extra_prompt) / replyer.before_model_request(messages) / replyer.after_response(守门) |
+| HookHandler | 5 | chat.receive(缓存) / planner.before_request(Planner注入) / replyer.before_request(extra_prompt) / replyer.before_model_request(items) / replyer.after_response(守门) |
 | EventHandler | 1 | 追踪（群号映射/计数/角色缓存） |
 | 安全护栏 | 8 步 | protected_users → exempt_users → admins → auto_exempt → mute_cooldown → 每日限额 → kick_confirm → 处罚阶梯 |
 | 配置分区 | 10 | plugin / admin / identity / auto_moderate / safeguard / warning / escalation / auto_approve / logging / prompts |

@@ -1,5 +1,38 @@
 # 更新日志
 
+### v2.7.0 (2026-08-30)
+
+**修复 MaiBot 新版本提示词注入失效（response item 协议适配）**
+
+**核心修复（2 项）**
+- MaiBot 新版本重构 maisaka 底层（chat message → response item），
+  `maisaka.planner.before_request` 与 `maisaka.replyer.before_model_request`
+  的 Hook 载荷从 `messages` 改为 `items`（Context Item：`item_type` / `meta` / `parts`），
+  旧插件找不到 `messages` 导致 Replyer / Planner 管理提示词注入静默失效。
+  v2.7 已按新协议向首个 `SystemMessageItem.parts` 追加管理提示词；无系统消息时
+  自动构造合法 `SystemMessageItem` 插入消息头。
+- 注入返回值改为保留完整 kwargs：`items` 注入同时回传 `item_schema_version`
+  （Planner 另保留 `tool_definitions`），`extra_prompt` 注入回传完整原 kwargs，
+  `after_response` 守门改写同样回传完整原 kwargs，
+  避免新版 Hook 分发整体替换 kwargs 后丢失任务名/模型名等字段。
+
+**兼容性（1 项）**
+- 保留旧版 `messages` 注入路径：旧版 MaiBot 仍按 `role` / `content` 结构注入，
+  升级插件后可同时兼容新旧两种 Hook 载荷。
+
+**提示词与介绍优化（3 项）**
+- 重写两个默认提示词模板：按「身份 / 处理规则 / 执行要求」分区排版，删除与动态追加内容
+  重复的身份说明；动态信息（群号、发言者昵称/身份/QQ/person_id）统一由插件在注入时追加，
+  模板不再使用冗长的单行拼接。
+- 精简注入后的附加区块：发言者信息合并为一行（昵称 + 身份 + QQ + person_id），
+  person_id 说明不再单独占一段，身份锁定规则压缩为两句。
+- 重写插件市场简介（manifest description 与 plugin 文档）：突出"开箱即用 + 核心功能"，
+  改善插件市场第一观感。
+
+**其他**
+- 版本号迭代至 2.7.0（manifest / config_version / README / CHANGELOG 同步更新），
+  并同步更新本地实例的插件副本至 v2.7.0。
+
 ### v2.6.0 (2026-08-13)
 
 **全功能命令入口 + QQ 身份映射优化**

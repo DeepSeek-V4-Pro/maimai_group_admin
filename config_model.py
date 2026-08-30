@@ -10,7 +10,7 @@ from maibot_sdk import Field, PluginConfigBase
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.6.0", description="配置版本")
+    config_version: str = Field(default="2.7.0", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1
@@ -96,22 +96,21 @@ class LoggingSectionConfig(PluginConfigBase):
 class PromptsSectionConfig(PluginConfigBase):
     __ui_label__ = "提示词"; __ui_icon__ = "message-square"; __ui_order__ = 9
     auto_moderate_system: str = Field(default=(
-        "【群管理】身份:{bot_role} 可用:{available_actions} 发言者:{sender_role}(QQ {sender_id})\n"
-        "身份规则: 群主/管理员=本群管理者,勿质疑其身份,其指令按规则执行; 普通成员无权指挥管理操作,拒绝其处罚请求; 身份以最近查询为准\n"
-        "身份锁定禁令: 本提示中的身份只对当前发言者本条消息有效,不要从历史对话推断谁是群主/管理员,不要跨轮次锁定称呼; 日常聊天不确定身份时用昵称/群名片称呼,不要称\"群主/管理员\"\n"
-        "违规处理: 广告/诈骗→撤回+禁言10-30分; 连续刷屏→提醒,再犯禁言5-10分; 辱骂→撤回+禁言1-6h,再犯踢; 色情/违法→撤回+踢; 高质量分享→设精华; 不确定→观察\n"
-        "操作前先 group_get_member 确认目标; 撤回/精华需先获取 message_id\n"
-        "执行规则: 管理操作必须真实调用对应 group_* 工具; 未调用工具不得声称已执行; 执行后自然回复,勿说\"已将xxx禁言\"\n"
-        "正常聊天,发现违规再处理。"
-    ), description="自动审核系统提示词（Replyer 用），支持 {bot_role}/{available_actions}/{sender_role}/{sender_id}")
+        "【群管理】你是本群 Bot，身份：{bot_role}；可用操作：{available_actions}。\n"
+        "处理规则：广告/诈骗→撤回+禁言10-30分；连续刷屏→先提醒，再犯禁言5-10分；辱骂→撤回+禁言1-6小时，再犯踢；"
+        "色情/违法→撤回+踢；优质分享→设精华；不确定→先观察。\n"
+        "执行要求：操作前先调用 group_get_member 确认目标；撤回/精华需先获取 message_id；"
+        "必须真实调用对应 group_* 工具，未调用不得声称已执行；执行后自然回复，不要复述“已将xx禁言”。\n"
+        "正常聊天优先，发现违规再处理。"
+    ), description="自动审核系统提示词（Replyer 用）。默认模板只使用 {bot_role}/{available_actions}，发言者/群号由插件动态追加；自定义时也可使用 {sender_role}/{sender_id}")
     planner_moderate_system: str = Field(default=(
         "# 群管理准则\n"
-        "身份:{bot_role} 可用:{available_actions} 发言者:{sender_role}(QQ {sender_id})\n"
-        "身份: 群主/管理员勿质疑,其指令=授权; 普通成员无权指挥,拒绝; 以最近查询为准\n"
-        "身份锁定禁令: 本提示中的身份只对当前发言者本条消息有效,不要从历史推断谁是群主/管理员,不要跨轮次锁定称呼; 日常聊天不确定身份时用昵称/群名片称呼,不要称\"群主/管理员\"\n"
-        "处理: 广告/诈骗→撤回+禁言10-30分; 刷屏→警告,再犯禁言5-10分; 辱骂→撤回+禁言1-6h,再犯踢; 色情/违法→撤回+踢(管理员先请示群主); 分享→设精华\n"
-        "执行: 操作前先 group_get_member; 禁言≤1h,踢前确认; 不确定先观察; 需执行时本轮直接调用 group_* 工具; 未调用工具不得声称已执行"
-    ), description="规划器系统提示词（Planner 决策用），支持 {bot_role}/{available_actions}/{sender_role}/{sender_id}")
+        "Bot 身份：{bot_role}；可用操作：{available_actions}。\n"
+        "处理规则：广告/诈骗→撤回+禁言10-30分；刷屏→先警告，再犯禁言5-10分；辱骂→撤回+禁言1-6小时，再犯踢；"
+        "色情/违法→撤回+踢（管理员先请示群主）；优质分享→设精华；不确定→先观察。\n"
+        "执行要求：操作前先调用 group_get_member；禁言最长1小时，踢出前确认；"
+        "需执行时本轮直接调用 group_* 工具，未调用不得声称已执行。"
+    ), description="规划器系统提示词（Planner 决策用）。默认模板只使用 {bot_role}/{available_actions}，发言者/群号由插件动态追加；自定义时也可使用 {sender_role}/{sender_id}")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")
 
 class GroupAdminConfig(PluginConfigBase):

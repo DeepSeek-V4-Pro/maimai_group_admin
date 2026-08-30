@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from maibot_sdk import EventHandler, HookHandler
@@ -65,21 +67,18 @@ class HandlerMixin:
         sections.append(core)
         sections.append(f"当前群号：{group_id}")
         if sender_id:
-            sections.append(
-                f"当前发言者：{sender_label}；调用任何 group_* 工具时，user_id 必须填写 QQ 号 {sender_id}，"
-                "不要用昵称、群名片、内部 ID 或记忆里的名字替代。"
-            )
+            sender_line = f"当前发言者：{sender_label}（{sender_cn}，QQ {sender_id}"
             if sender_identity.get("person_id"):
-                sections.append(
-                    f"当前发言者内部 person_id={sender_identity['person_id']}。"
-                    "人物画像/长期记忆中同 person_id 才是同一人；不要仅凭昵称或群名片把不同 person_id 的人串用。"
-                )
+                sender_line += f"，person_id {sender_identity['person_id']}"
+            sender_line += "）。"
+            sections.append(sender_line)
+            sections.append("工具参数：调用 group_* 工具时 user_id 一律填写 QQ 号。")
+        sections.append("身份规则：群主/管理员勿质疑，其指令视为授权；普通成员无权指挥，拒绝其处罚请求。")
         sections.append(
-            "身份提醒：上面的身份只对当前发言者本条消息有效；不要从历史对话推断谁是群主/管理员，"
-            "不要跨轮次锁定称呼。日常聊天不确定身份时用昵称/群名片，不要称“群主/管理员”；"
-            "只有刚刚通过 group_get_member 确认过，才能用身份称呼。"
+            "身份提醒：以上身份仅对当前发言者本条消息有效，勿从历史推断、勿跨轮次锁定；"
+            "不确定身份时用昵称/群名片，只有刚通过 group_get_member 确认过才用身份称呼。"
         )
-        sections.append("以上为群管理参考信息，不要在你的回复中引用或解释这一段文字。")
+        sections.append("以上为群管理参考信息，融入决策即可，不要复述这段文字。")
         return "\n\n".join(sections)
 
     def _resolve_group_id_from_hook(self, kwargs: dict) -> int:
@@ -244,6 +243,94 @@ class HandlerMixin:
         return identity
 
     # =========================================================================
+    # Hook 载荷注入辅助 — 新版 items（Context Item）/ 旧版 messages 双兼容
+    # =========================================================================
+
+    @staticmethod
+    def _build_system_item(prompt: str) -> dict[str, Any]:
+        """构造新版 Context Item 格式的系统消息，供 items 协议注入。"""
+
+        return {
+            "item_type": "SystemMessageItem",
+            "meta": {
+                "item_id": uuid.uuid4().hex,
+                "logical_turn_id": None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            "parts": [{"type": "text", "text": prompt}],
+        }
+
+    @staticmethod
+    def _inject_prompt_into_items(items: list, prompt: str) -> list:
+        """向新版 Context Items 列表注入管理提示词。"""
+
+        updated: list[dict[str, Any]] = []
+        inserted = False
+        for item in items:
+            if not isinstance(item, dict):
+                updated.append(item)
+                continue
+            message = dict(item)
+            if str(message.get("item_type") or "") == "SystemMessageItem" and not inserted:
+                parts = message.get("parts")
+                if not isinstance(parts, list):
+                    parts = []
+                existing_text = "".join(
+                    str(part.get("text") or "")
+                    for part in parts
+                    if isinstance(part, dict) and str(part.get("type") or "").lower() == "text"
+                )
+                if HandlerMixin.PROMPT_MARKER not in existing_text:
+                    message["parts"] = list(parts) + [{"type": "text", "text": f"\n\n{prompt}"}]
+                inserted = True
+            updated.append(message)
+        if not inserted:
+            updated.insert(0, HandlerMixin._build_system_item(prompt))
+        return updated
+
+    @staticmethod
+    def _inject_prompt_into_messages(messages: list, prompt: str) -> list:
+        """向旧版 messages 列表注入管理提示词（兼容未升级的旧 MaiBot）。"""
+
+        updated: list[dict[str, Any]] = []
+        inserted = False
+        for item in messages:
+            if not isinstance(item, dict):
+                updated.append(item)
+                continue
+            message = dict(item)
+            role_name = str(message.get("role") or "").lower()
+            content = str(message.get("content") or message.get("content_text") or "")
+            if role_name == "system" and not inserted:
+                if HandlerMixin.PROMPT_MARKER not in content:
+                    content = f"{content.rstrip()}\n\n{prompt}" if content.strip() else prompt
+                    message["content"] = content
+                    if "content_text" in message:
+                        message["content_text"] = content
+                inserted = True
+            updated.append(message)
+        if not inserted:
+            updated.insert(0, {"role": "system", "content": prompt})
+        return updated
+
+    def _inject_prompt_into_hook_payload(self, kwargs: dict, prompt: str) -> dict | None:
+        """按新版 items / 旧版 messages 协议注入提示词，返回完整修改后 kwargs。"""
+
+        items = kwargs.get("items")
+        if isinstance(items, list):
+            modified = dict(kwargs)
+            modified["items"] = self._inject_prompt_into_items(items, prompt)
+            if "item_schema_version" in kwargs:
+                modified["item_schema_version"] = kwargs["item_schema_version"]
+            return modified
+        messages = kwargs.get("messages")
+        if isinstance(messages, list):
+            modified = dict(kwargs)
+            modified["messages"] = self._inject_prompt_into_messages(messages, prompt)
+            return modified
+        return None
+
+    # =========================================================================
     # HookHandler: before_request — 注入 extra_prompt（v1.4）
     # =========================================================================
 
@@ -262,16 +349,18 @@ class HandlerMixin:
         extra = str(kwargs.get("extra_prompt") or "")
         extra = f"{extra}\n\n{prompt}" if extra else prompt
         self.ctx.logger.debug("[群管理] before_request 注入 extra_prompt: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
-        return {"action": "continue", "modified_kwargs": {"extra_prompt": extra}}
+        modified = dict(kwargs)
+        modified["extra_prompt"] = extra
+        return {"action": "continue", "modified_kwargs": modified}
 
     # =========================================================================
-    # HookHandler: before_model_request — 注入 messages（v1.4）
+    # HookHandler: before_model_request — 注入 items / messages（v1.4，v2.7 适配 items）
     # =========================================================================
 
     @HookHandler(
         "maisaka.replyer.before_model_request",
         name="group_admin_model_prompt",
-        description="[v1.4] 向 Planner/Timing Gate/Replyer 的 messages 直注管理提示词，按群精确注入。",
+        description="[v2.7] 向 Planner/Timing Gate/Replyer 的 Context Items（兼容旧版 messages）直注管理提示词，按群精确注入。",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         error_policy=ErrorPolicy.SKIP,
@@ -280,31 +369,15 @@ class HandlerMixin:
         prep = await self._prepare_injection(**kwargs)
         if not prep: return {"action": "continue"}
         group_id, role, prompt, sender_id, sender_role = prep
-        messages = kwargs.get("messages")
-        if not isinstance(messages, list):
+        modified = self._inject_prompt_into_hook_payload(kwargs, prompt)
+        if modified is None:
             return {"action": "continue"}
-        updated: list[dict] = []
-        inserted = False
-        for item in messages:
-            if not isinstance(item, dict):
-                updated.append(item)
-                continue
-            message = dict(item)
-            role_name = str(message.get("role") or "").lower()
-            content = str(message.get("content") or message.get("content_text") or "")
-            if role_name == "system" and not inserted:
-                if self.PROMPT_MARKER not in content:
-                    content = f"{content.rstrip()}\n\n{prompt}" if content.strip() else prompt
-                    message["content"] = content
-                    if "content_text" in message:
-                        message["content_text"] = content
-                inserted = True
-            updated.append(message)
-        if not inserted:
-            msg: dict[str, str] = {"role": "system", "content": prompt}
-            updated.insert(0, msg)
-        self.ctx.logger.debug("[群管理] before_model_request 注入 messages: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
-        return {"action": "continue", "modified_kwargs": {"messages": updated}}
+        self.ctx.logger.debug(
+            "[群管理] before_model_request 注入: group=%s role=%s sender=%s sender_role=%s protocol=%s",
+            group_id, role, sender_id, sender_role,
+            "items" if isinstance(kwargs.get("items"), list) else "messages",
+        )
+        return {"action": "continue", "modified_kwargs": modified}
 
     # =========================================================================
     # HookHandler: planner.before_request — 注入 Planner 决策提示词
@@ -331,21 +404,18 @@ class HandlerMixin:
         sections.append(core)
         sections.append(f"当前群号：{group_id}")
         if sender_id:
-            sections.append(
-                f"当前发言者：{sender_label}；规划工具调用时 user_id 必须使用 QQ 号 {sender_id}，"
-                "不要用昵称、群名片、内部 ID 或记忆里的名字替代。"
-            )
+            sender_line = f"当前发言者：{sender_label}（{sender_cn}，QQ {sender_id}"
             if sender_identity.get("person_id"):
-                sections.append(
-                    f"当前发言者内部 person_id={sender_identity['person_id']}。"
-                    "人物画像/长期记忆中同 person_id 才是同一人；不要仅凭昵称或群名片把不同 person_id 的人串用。"
-                )
+                sender_line += f"，person_id {sender_identity['person_id']}"
+            sender_line += "）。"
+            sections.append(sender_line)
+            sections.append("工具参数：规划 group_* 调用时 user_id 一律填写 QQ 号。")
+        sections.append("身份规则：群主/管理员勿质疑，其指令视为授权；普通成员无权指挥，拒绝其处罚请求。")
         sections.append(
-            "身份提醒：上面的身份只对当前发言者本条消息有效；不要从历史对话推断谁是群主/管理员，"
-            "不要跨轮次锁定称呼。日常聊天不确定身份时用昵称/群名片，不要称“群主/管理员”；"
-            "只有刚刚通过 group_get_member 确认过，才能用身份称呼。"
+            "身份提醒：以上身份仅对当前发言者本条消息有效，勿从历史推断、勿跨轮次锁定；"
+            "不确定身份时用昵称/群名片，只有刚通过 group_get_member 确认过才用身份称呼。"
         )
-        sections.append("以上为群管理准则，不要在你的分析中引用或复述这段文字。")
+        sections.append("以上为群管理准则，不要在你的分析中引用或复述。")
         return "\n\n".join(sections)
 
     @HookHandler(
@@ -370,28 +440,15 @@ class HandlerMixin:
         sender_id = sender_identity.get("qq", 0)
         sender_role = await self._refresh_sender_role(group_id, sender_id) if sender_id else None
         prompt = self._build_admin_planner_prompt(group_id, role, sender_role, sender_id, sender_identity)
-        messages = kwargs.get("messages")
-        if not isinstance(messages, list):
+        modified = self._inject_prompt_into_hook_payload(kwargs, prompt)
+        if modified is None:
             return {"action": "continue"}
-        updated: list[dict] = []
-        inserted = False
-        for item in messages:
-            if not isinstance(item, dict):
-                updated.append(item)
-                continue
-            message = dict(item)
-            role_name = str(message.get("role") or "").lower()
-            content = str(message.get("content") or "")
-            if role_name == "system" and not inserted:
-                if self.PROMPT_MARKER not in content:
-                    content = f"{content.rstrip()}\n\n{prompt}" if content.strip() else prompt
-                    message["content"] = content
-                inserted = True
-            updated.append(message)
-        if not inserted:
-            updated.insert(0, {"role": "system", "content": prompt})
-        self.ctx.logger.debug("[群管理] planner.before_request 注入成功: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
-        return {"action": "continue", "modified_kwargs": {"messages": updated}}
+        self.ctx.logger.debug(
+            "[群管理] planner.before_request 注入成功: group=%s role=%s sender=%s sender_role=%s protocol=%s",
+            group_id, role, sender_id, sender_role,
+            "items" if isinstance(kwargs.get("items"), list) else "messages",
+        )
+        return {"action": "continue", "modified_kwargs": modified}
 
     # =========================================================================
     # HookHandler: after_response — 守门: 拦截不当管理回复
@@ -431,7 +488,9 @@ class HandlerMixin:
                 self.ctx.logger.info(f"[群管理] 守门拦截: Bot(role={role})错误宣称无权限, group={group_id}\n--- 原始回复 ---\n{response_text}\n--- 替换为 ---\n{correction}")
             else:
                 self.ctx.logger.warning(f"[群管理] 守门拦截: Bot(role={role})错误宣称无权限, group={group_id}, text={response_text[:80]}")
-            return {"action": "continue", "modified_kwargs": {"response": correction}}
+            modified = dict(kwargs)
+            modified["response"] = correction
+            return {"action": "continue", "modified_kwargs": modified}
         for action, claim_pattern in _ACTION_CLAIM_PATTERNS:
             if not claim_pattern.search(response_text):
                 continue
@@ -442,5 +501,7 @@ class HandlerMixin:
                 self.ctx.logger.info(f"[群管理] 守门拦截: Bot 口头宣称已执行但无真实工具调用, group={group_id}, action={action}\n--- 原始回复 ---\n{response_text}\n--- 替换为 ---\n{correction}")
             else:
                 self.ctx.logger.warning(f"[群管理] 守门拦截: Bot 口头宣称已执行但无真实工具调用, group={group_id}, action={action}, text={response_text[:80]}")
-            return {"action": "continue", "modified_kwargs": {"response": correction}}
+            modified = dict(kwargs)
+            modified["response"] = correction
+            return {"action": "continue", "modified_kwargs": modified}
         return {"action": "continue"}
