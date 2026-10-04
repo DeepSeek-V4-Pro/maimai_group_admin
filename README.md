@@ -1,4 +1,10 @@
-# 群管理助手 v2.7 — 给 QQ 群装一个“自动小管理员”
+# 群管理助手 v2.7.1 — 给 QQ 群装一个“自动小管理员”
+
+## v2.7.1 的权限变化
+
+Bot 在当前群为**群主**时，完整开放插件已有管理功能，跳过插件护栏，无需人类再次确认。Bot 为**管理员**时继续应用原有配置限制。普通成员的管理命令授权不变；Bot 可将普通成员举报作为线索，依据证据自主决策。
+
+本次本地部署同步只替换旧版默认提示词，保留自定义提示词。其他实例升级时请将默认提示词重置为新版。若自定义提示词写有“禁言最长一小时”“踢人需请示”等要求，请自行按群主完整权限说明调整。
 
 **这个插件是干什么的？**
 
@@ -73,13 +79,14 @@
 3. **不建议在严肃的管理场景中完全依赖本插件**。建议保持人类管理员对关键决策的监督和干预能力。
 4. **请遵守 QQ 平台的使用规范**，合理设置禁言时长和操作频率，避免因频繁操作导致 Bot 账号被限制。
 5. **Bot 必须是群管理员或群主**才能执行管理操作。如果 Bot 是普通成员，所有管理 Tool 将无法使用。
-6. 本插件基于 MaiBot Plugin SDK v2 和 NapCat 适配器开发，不保证与其他适配器或 SDK 版本的兼容性。
+6. 本插件基于 MaiBot Plugin SDK v2 和 QQ 适配器开发；当前以 SnowLuma 1.1.0 合并适配器为核对基准（仍提供 `adapter.napcat.*` 接口），不保证与其他适配器或 SDK 版本的兼容性。
 
 ---
 
 ## 📌 版本兼容性
 
-- **兼容版本**：MaiBot **1.0.0 ~ 1.99.99**（MaiBot Plugin SDK v2）
+- **本次核对**：MaiBot 1.3.2 + SnowLuma 1.1.0；18 个工具、29 个命令均完成模拟回归，接口参数与本地合并适配器一致。详细结果见 [AUDIT.md](AUDIT.md)。
+- **兼容版本声明**：MaiBot **1.0.0 ~ 1.99.99**（MaiBot Plugin SDK v2）
 - **已知问题**：MaiBot 核心 `hook_dispatcher` 的 `kwargs` 替换逻辑（`= dict(...)` 完全替换而非合并 `update`）可能导致多插件共用同一 Hook 点时后注册的插件拿不到 `session_id` 等关键参数。本插件已通过 `cache_session_group` 从 `message.session_id` 直接提取会话 ID 绕过此限制。
 
 ---
@@ -89,14 +96,14 @@
 本插件设计为**轻量娱乐向**的群管理辅助工具，核心理念是：
 
 - **LLM 自主判断**：Bot 根据上下文自行决定何时操作，无需人工逐一指令
-- **人类兜底**：通过 `/admin` 命令和 `exempt_users` 等机制，管理员可随时纠正或阻止 Bot 的操作
-- **安全优先**：默认配置保守（`daily_mute_limit=10`、`max_mute_duration=3600s`、`auto_exempt_admins=true`），建议先在测试群试用
+- **人类兜底**：通过 `/admin off` 暂停当前群管理；Bot 为管理员时，保护与豁免名单可拦截目标操作
+- **管理员角色护栏**：Bot 为管理员时默认配置保守（`daily_mute_limit=10`、`max_mute_duration=3600s`、`auto_exempt_admins=true`），建议先在测试群试用
 
 **如需用于正式群管理**，建议：
 
 1. 将 `auto_moderate.enabled` 设为 `false`，仅通过管理员命令手动操作
 2. 关闭自动审批（`auto_approve.enabled = false`）
-3. 将 `protected_users` 配置所有不应被操作的用户
+3. Bot 为管理员时将 `protected_users` 配置所有不应被操作的用户；Bot 为群主时这些名单不拦截操作
 4. 定期通过 `/admin log` 审查操作记录
 5. 保持至少一名人类管理员在线监督
 
@@ -172,7 +179,7 @@ WebUI → 插件管理 → 找到 `deepseek-v4-pro.maimai-group-admin` → 点�
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | `false` | 插件总开关，设为 `true` 后插件才开始工作 |
-| `config_version` | string | `"2.7.0"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
+| `config_version` | string | `"2.7.1"` | 配置版本号，升级插件时用于迁移判断，**请勿手动修改** |
 
 ---
 
@@ -231,9 +238,9 @@ WebUI → 插件管理 → 找到 `deepseek-v4-pro.maimai-group-admin` → 点�
 | `mute_cooldown` | int | `300` | 同一用户两次禁言的最小间隔（秒）。已实际执行，tool_mute_user 和 /mute 命令均会检查 |
 | `daily_mute_limit` | int | `10` | 每个群每天最大禁言次数（防止误操作风暴） |
 | `daily_kick_limit` | int | `3` | 每个群每天最大踢人次数 |
-| `protected_users` | list[string] | `[]` | **全局保护名单**，这些 QQ 号在任何群里都不会被操作。建议填群主和重要成员 |
+| `protected_users` | list[string] | `[]` | **全局保护名单**，Bot 为管理员时，这些 QQ 号不会被操作；Bot 为群主时跳过。建议填群主和重要成员 |
 | `exempt_users` | dict[str,list] | `{}` | **按群豁免名单**，格式见下方示例。通过 `/admin ban`/`unban` 命令也可添加 |
-| `auto_exempt_admins` | bool | `true` | 是否自动豁免群主和管理员（系统硬拦截，LLM 无法操作他们） |
+| `auto_exempt_admins` | bool | `true` | Bot 为管理员时是否自动豁免群主和管理员；Bot 为群主时跳过 |
 
 > `exempt_users` 示例：
 > ```toml
@@ -364,7 +371,7 @@ WebUI → 插件管理 → 找到 `deepseek-v4-pro.maimai-group-admin` → 点�
 
 ### 一、LLM 自动管理层（18 个 Tool + 5 个 HookHandler）
 
-Bot 通过 chat.receive.after_process HookHandler 缓存 msg_id → group_id 和当前发言者，为双路注入（`before_request → extra_prompt` + `before_model_request → messages`）提供精确的群号映射。每次 LLM 思考时按群注入管理上下文，并携带**当前发言者的身份**（群主/管理员/普通成员），Planner/Timing Gate/Replyer 全部具备管理意识。回复后 `after_response` HookHandler 守门检查不当行为。
+Bot 通过 chat.receive.after_process HookHandler 缓存 msg_id → group_id 和当前发言者，为双路注入（`before_request → extra_prompt` + `before_model_request → items（兼容旧 messages）`）提供精确的群号映射。每次 LLM 思考时按群注入管理上下文，并携带**当前发言者的身份**（群主/管理员/普通成员），Planner 与 Replyer 具备管理意识。回复后 `after_response` HookHandler 守门检查不当行为。
 
 > `chat.receive.after_process` 缓存钩子实现按群精确注入（每个群获取真实 bot 角色与发言者身份），未启用群和私聊自动跳过。发言者身份按 `sender_role_refresh_seconds`（默认 120 秒）主动刷新，Bot 角色按 `bot_role_refresh_seconds`（默认 300 秒）刷新。
 
@@ -375,13 +382,13 @@ Bot 通过 chat.receive.after_process HookHandler 缓存 msg_id → group_id 和
 | `group_warn_user` | group_id, user_id, violation_type(spam/abuse/ad), reason | 管理员 | 发送警告消息 + 写入警告计数器，阈值达标后提示升级 |
 | `group_mute_user` | group_id, user_id, duration(秒), reason | 管理员 | 禁言指定用户，受 max_mute_duration 限制 |
 | `group_unmute_user` | group_id, user_id | 管理员 | 解除禁言（duration=0） |
-| `group_kick_user` | group_id, user_id, reason | 管理员/群主 | 踢出用户。管理员需在严重违规请示群主或群主要求时使用 |
+| `group_kick_user` | group_id, user_id, reason | 管理员/群主 | 踢出用户。Bot 群主可自主执行；Bot 管理员遵循配置护栏 |
 | `group_recall_msg` | group_id, message_id, reason | 管理员 | 撤回消息（群主/管理员无2分钟限制，需先回复目标消息获取 message_id） |
 | `group_set_essence` | group_id, message_id | 管理员 | 设为精华消息（需先让用户回复目标消息获取 message_id） |
 | `group_unset_essence` | group_id, message_id | 管理员 | 取消精华 |
 | `group_set_user_card` | group_id, user_id, card | 管理员 | 修改群名片（只能改普通成员） |
 | `group_approve_join` | group_id, request_id, reason(可选) | 管理员 | 通过入群申请 |
-| `group_reject_join` | group_id, request_id, reason | 管理员 | 拒绝入群申请 |
+| `group_reject_join` | group_id, request_id, reason, sub_type（可选） | 管理员 | 拒绝入群申请 |
 | `group_set_name` | group_id, name | **仅群主** | 修改群名称 |
 | `group_set_title` | group_id, user_id, title | **仅群主** | 设置专属头衔（最长6字符） |
 | `group_post_notice` | group_id, content | 管理员/群主 | 发布群公告，返回 notice_id 供后续删除 |
@@ -400,7 +407,7 @@ Bot 通过 chat.receive.after_process HookHandler 缓存 msg_id → group_id 和
 
 Tool 全部 18 个静态注册，始终可用。Bot 角色的影响在 prompt 注入环节体现：
 
-- **群主**：注入完整管理权限描述（"全部管理: 禁言/解禁/警告/设精华/撤回/改名片/公告/改名/审批入群/踢人"）
+- **群主**：注入完整管理权限描述，包含专属头衔、取消精华与公告删除；不需要向其他成员请示
 - **管理员**：注入受限描述（"禁言/解禁/警告/设精华/撤回/改名片/公告/审批入群/踢人"）
 - **普通成员**：注入提示"你在此群无管理操作权限，可协助管理员做决策建议。"
 
@@ -429,14 +436,14 @@ Tool 全部 18 个静态注册，始终可用。Bot 角色的影响在 prompt �
 
 | 命令 | 用法 | 权限 | 安全护栏 |
 |------|------|------|----------|
-| `/mute @qq 5分钟 刷屏` | 禁言，支持 QQ 号或昵称 | 群主/管理员/全局管理员 | 受保护用户/豁免名单检查 |
+| `/mute @qq 5分钟 刷屏` | 禁言，支持 QQ 号或昵称 | 群主/管理员/全局管理员 | Bot 为管理员时检查保护/豁免名单 |
 | `/unmute @qq` | 解禁 | 群主/管理员/全局管理员 | — |
-| `/kick @qq 广告` | 踢出 | 群主/管理员/全局管理员 | 受保护用户/豁免名单检查 |
+| `/kick @qq 广告` | 踢出 | 群主/管理员/全局管理员 | Bot 为管理员时检查保护/豁免名单 |
 | `/warn @qq spam 原因` | 正式警告 | 群主/管理员/全局管理员 | — |
 | `/essence` | 设精华（需先回复目标消息） | 群主/管理员/全局管理员 | — |
 | `/unessence` | 取消精华（需先回复目标消息） | 群主/管理员/全局管理员 | — |
 | `/recall` | 撤回（需先回复目标消息） | 群主/管理员/全局管理员 | — |
-| `/card @qq 新名片` | 修改群名片 | 群主/管理员/全局管理员 | 受保护用户/豁免名单检查 |
+| `/card @qq 新名片` | 修改群名片 | 群主/管理员/全局管理员 | Bot 为管理员时检查保护/豁免名单 |
 | `/shutlist` | 查看禁言列表 | 群主/管理员/全局管理员 | — |
 | `/sysmsg` | 查看入群申请/群系统消息 | 群主/管理员/全局管理员 | — |
 
@@ -477,7 +484,9 @@ Tool 全部 18 个静态注册，始终可用。Bot 角色的影响在 prompt �
 
 ### 三、安全护栏（8 步校验链）
 
-所有 LLM Tool 和 `/mute` `/kick` 快捷命令在执行前均按以下顺序校验：
+Bot 为群主时，工具、快捷命令和自动审批均跳过插件设置的保护/豁免、管理员目标保护、禁言时长上限、冷却、每日限额、处罚阶梯及踢人前置查询。禁言仍须符合 QQ 接口范围（1–2592000 秒）；参数与操作结果以 QQ 平台为准。人类命令发送者的授权规则不变，普通成员不会因此获得管理命令权限。
+
+Bot 为管理员时，警告/禁言/踢人等相关入口分别应用以下护栏（并非每个工具都会执行全部八项）：
 
 ```
 ① protected_users（全局保护名单）
@@ -552,13 +561,13 @@ LLM 每次思考（Planner / Replyer / Timing Gate）
 > `items`（`item_type` / `meta` / `parts` 的 Context Item 结构）。插件已升级为
 > 注入 `SystemMessageItem.parts`，同时保留旧版 `messages` 兼容路径。
 
-#### 管理上下文 Prompt（v2.7 重构版）
+#### 管理上下文 Prompt（v2.7.1）
 
 ```
-【群管理】你是本群 Bot，身份:{bot_role}；可用操作:{available_actions}。
-处理规则: 广告/诈骗→撤回+禁言10-30分; 连续刷屏→先提醒,再犯禁言5-10分; 辱骂→撤回+禁言1-6小时,再犯踢; 色情/违法→撤回+踢; 优质分享→设精华; 不确定→先观察。
-执行要求: 操作前先调用 group_get_member 确认目标; 撤回/精华需先获取 message_id; 必须真实调用对应 group_* 工具,未调用不得声称已执行; 执行后自然回复,不要复述"已将xx禁言"。
-正常聊天优先,发现违规再处理。
+【群管理】你是本群 Bot，身份：{bot_role}；可用操作：{available_actions}。
+处理规则：根据当前证据与严重程度选择提醒、撤回、禁言或踢出；正常聊天不要误判。优质分享可设精华；证据不足时先查询或观察。
+执行要求：目标身份或 QQ 不确定时先调用 group_get_member 确认；撤回/精华需先获取 message_id；必须真实调用对应 group_* 工具，未调用不得声称已执行；执行后根据成功或失败结果简洁回复。
+正常聊天优先，发现违规再处理。
 ```
 
 模板之外，插件会在每次注入时自动追加动态上下文（不再写进模板，避免重复）：
@@ -584,11 +593,11 @@ LLM 每次思考（Planner / Replyer / Timing Gate）
 |--------|------|----------|
 | 1 | `config.admin.admins` 中的 QQ 号 | 跨群有效，不受任何限制 |
 | 2 | 发送者为目标群群主 + `allow_group_owner=true` | 当前群，受 `owner_allowed_commands` 白名单限制 |
-| 3 | admins 为空时默认仅群主可用 | 安全默认值 |
+| 3 | 发送者为群管理员 | 常规管理命令；不包含 `/admin` 系列及仅群主命令 |
 
 #### Bot 角色检测
 
-- **自动检测**（`auto_detect=true`）：首次收到群消息时调用 `get_group_member_info(self_id)` 获取角色
+- **自动检测**（`auto_detect=true`）：通过消息 self_id、配置 bot_qq 或登录信息接口确定自身账号，再调用 `get_group_member_info(self_id)` 获取角色
 - **手动覆盖**：`identity.override_roles` 配置优先级高于自动检测
 - **配置 bot_qq**：推荐填写 `identity.bot_qq`，避免因未收到消息事件导致检测失败
 - **刷新周期**：Bot 角色每 `bot_role_refresh_seconds`（默认 5 分钟）刷新一次；检测失败时 60 秒后自动重试，不再长时间停留在错误的"普通成员"状态
@@ -607,6 +616,8 @@ LLM 每次思考（Planner / Replyer / Timing Gate）
 ---
 
 ## 推荐配置
+
+以下 safeguard、处罚阶梯和审批限额示例仅约束 Bot 管理员角色；Bot 为群主时跳过这些限制。
 
 ### 娱乐向（默认适合）
 
@@ -791,7 +802,7 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ## 技术细节
 
-- **平台**：QQ（NapCat / MaiBot1.0-1.99）
+- **平台**：QQ（SnowLuma 合并适配器 / 兼容独立 NapCat API）
 - **SDK**：MaiBot Plugin SDK v2
 - **适配器**：MaiBot-Napcat-Adapter
 - **提示词注入**：三阶段注入 — `chat.receive.after_process` 缓存映射 → `maisaka.planner.before_request`（Planner 决策准则） → `maisaka.replyer.before_request` + `before_model_request`（Replyer 自然语言提示）；v2.7 起 `before_model_request` / `planner.before_request` 使用新版 Context Items（`items`）载荷，兼容旧版 `messages`
@@ -803,7 +814,7 @@ max_duration = 1800          # 首次就禁言30分钟
 
 ---
 
-## v2.7 功能总览
+## v2.7.1 功能总览
 
 | 模块 | 数量 | 详情 |
 |------|:---:|------|
@@ -811,7 +822,7 @@ max_duration = 1800          # 首次就禁言30分钟
 | 命令入口 | 29 | /admin(status\|off\|on\|undo\|log\|perm\|ban\|unban) + /mute / /unmute / /kick / /warn / /essence / /unessence / /recall / /shutlist / /mytitle / /member / /notices / /sysmsg / /card / /settitle / /setname / /notice / /delnotice / /approve / /reject / /setmytitle / /setmycard |
 | HookHandler | 5 | chat.receive(缓存) / planner.before_request(Planner注入) / replyer.before_request(extra_prompt) / replyer.before_model_request(items) / replyer.after_response(守门) |
 | EventHandler | 1 | 追踪（群号映射/计数/角色缓存） |
-| 安全护栏 | 8 步 | protected_users → exempt_users → admins → auto_exempt → mute_cooldown → 每日限额 → kick_confirm → 处罚阶梯 |
+| 管理员护栏 | 8 步（群主跳过） | protected_users → exempt_users → admins → auto_exempt → mute_cooldown → 每日限额 → kick_confirm → 处罚阶梯 |
 | 配置分区 | 10 | plugin / admin / identity / auto_moderate / safeguard / warning / escalation / auto_approve / logging / prompts |
 | 自动审批 | 支持 | 全局 + 按群独立覆盖（TOML 数组表），关键词过滤 + 每日限额 |
 | 警告系统 | 支持 | spam / abuse / ad 三类，可配阈值和计数窗口 |

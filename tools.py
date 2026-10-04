@@ -24,7 +24,7 @@ class ToolMixin:
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="警告原因", required=True),
     ])
     async def tool_warn_user(self, group_id: int = 0, user_id: int = 0, violation_type: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
-        stream_id = str(kwargs.get("stream_id", ""))
+        stream_id = str(kwargs.get("stream_id") or kwargs.get("session_id") or "")
         group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
         del kwargs
@@ -59,6 +59,8 @@ class ToolMixin:
         group_id = self._resolve_tool_group_id(group_id, kwargs)
         user_id = self._to_int(user_id)
         duration = self._to_int(duration)
+        if duration <= 0 or duration > 2592000:
+            return {"name": "group_mute_user", "content": "禁言秒数必须为 1–2592000；解禁请使用 group_unmute_user"}
         del kwargs
         if group_id <= 0 or user_id <= 0:
             return {"name": "group_mute_user", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
@@ -68,14 +70,14 @@ class ToolMixin:
             is_protected, msg = await self._is_protected(group_id, user_id)
             if is_protected: return {"name": "group_mute_user", "content": f"无法禁言: {msg}"}
             sf = self.config.safeguard
-            if duration > sf.max_mute_duration:
+            if not await self._owner_unrestricted(group_id) and duration > sf.max_mute_duration:
                 duration = sf.max_mute_duration
             today = self._today_key()
             self._daily_mute_count.setdefault(group_id, {}).setdefault(today, 0)
-            if self._daily_mute_count[group_id][today] >= sf.daily_mute_limit: return {"name": "group_mute_user", "content": f"今天已经禁言了 {sf.daily_mute_limit} 个用户，已达每日上限"}
+            if not await self._owner_unrestricted(group_id) and self._daily_mute_count[group_id][today] >= sf.daily_mute_limit: return {"name": "group_mute_user", "content": f"今天已经禁言了 {sf.daily_mute_limit} 个用户，已达每日上限"}
             mute_key = (group_id, user_id)
             last_mute = self._last_mute_time.get(mute_key, 0)
-            if sf.mute_cooldown > 0 and (time.time() - last_mute) < sf.mute_cooldown:
+            if not await self._owner_unrestricted(group_id) and sf.mute_cooldown > 0 and (time.time() - last_mute) < sf.mute_cooldown:
                 remain = int(sf.mute_cooldown - (time.time() - last_mute))
                 return {"name": "group_mute_user", "content": f"该用户 {remain} 秒前刚被禁言过，冷却中（至少间隔 {sf.mute_cooldown} 秒）"}
             esc = self._check_escalation(group_id, user_id)
@@ -126,7 +128,7 @@ class ToolMixin:
     # Tool: group_kick_user
     # =========================================================================
 
-    @Tool("group_kick_user", description="踢出指定群成员（管理员需在严重违规请示群主或群主要求时使用），踢人前先调 group_get_member 确认身份", visibility="visible", parameters=[
+    @Tool("group_kick_user", description="踢出指定群成员（Bot 群主可自主执行；Bot 管理员遵循配置护栏），目标不确定时先查询身份", visibility="visible", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="user_id", param_type=ToolParamType.INTEGER, description="用户QQ号", required=True),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="踢出原因", required=True),
@@ -140,7 +142,7 @@ class ToolMixin:
         self.ctx.logger.info(f"[群管理] Tool-kick: group={group_id} user={user_id}")
         async with self._lock:
             await self._check_daily_reset(group_id)
-            bot_role = self._get_group_role(group_id)
+            bot_role = await self._ensure_bot_role(group_id)
             if bot_role not in ("owner", "admin"):
                 return {"name": "group_kick_user", "content": "权限不足，仅群主和管理员可以踢人"}
             is_protected, msg = await self._is_protected(group_id, user_id)
@@ -149,20 +151,20 @@ class ToolMixin:
             if esc and esc.action == "mute":
                 return {"name": "group_kick_user", "content": f"处罚阶梯建议先禁言 {esc.max_duration} 秒而非直接踢出，请使用 group_mute_user"}
             sf = self.config.safeguard
-            if sf.kick_require_confirm:
+            if not await self._owner_unrestricted(group_id) and sf.kick_require_confirm:
                 called_time = self._get_member_called.get(group_id, {}).get(user_id, 0)
                 if time.time() - called_time > 300:
                     return {"name": "group_kick_user", "content": "踢人前请先调用 group_get_member 确认目标身份"}
             today = self._today_key()
             self._daily_kick_count.setdefault(group_id, {}).setdefault(today, 0)
-            if self._daily_kick_count[group_id][today] >= sf.daily_kick_limit: return {"name": "group_kick_user", "content": f"今天已经踢出了 {sf.daily_kick_limit} 个用户，已达每日上限"}
+            if not await self._owner_unrestricted(group_id) and self._daily_kick_count[group_id][today] >= sf.daily_kick_limit: return {"name": "group_kick_user", "content": f"今天已经踢出了 {sf.daily_kick_limit} 个用户，已达每日上限"}
             try:
                 ok, data = await self._call_api(api_name="adapter.napcat.group.set_group_kick", group_id=group_id, user_id=user_id, reject_add_request=False)
                 if not ok: self._add_log(group_id, "kick", user_id, reason, False); return {"name": "group_kick_user", "content": f"踢出未能生效: {data}"}
                 self._daily_kick_count[group_id][today] += 1
                 self._add_log(group_id, "kick", user_id, reason, True)
                 self._mark_tool_executed(group_id, "kick")
-                self._get_member_called[group_id].pop(user_id, None)
+                self._get_member_called.get(group_id, {}).pop(user_id, None)
                 return {"name": "group_kick_user", "content": f"已将 @{user_id} 踢出群聊，原因：{reason}"}
             except Exception:
                 self._add_log(group_id, "kick", user_id, reason, False)
@@ -256,9 +258,12 @@ class ToolMixin:
     @Tool("group_approve_join", description="通过入群申请（管理员/群主可用），request_id 从 group_get_system_msg 获取", visibility="visible", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="request_id", param_type=ToolParamType.STRING, description="申请ID (来自 group_get_system_msg)", required=True),
+        ToolParameterInfo(name="sub_type", param_type=ToolParamType.STRING, description="add=入群申请（默认）；invite=入群邀请", required=False),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="通过原因(可选)", required=False),
     ])
-    async def tool_approve_join(self, group_id: int = 0, request_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
+    async def tool_approve_join(self, group_id: int = 0, request_id: str = "", reason: str = "", sub_type: str = "add", **kwargs: Any) -> dict[str, Any]:
+        if sub_type not in ("add", "invite") or not request_id:
+            return {"name": "group_approve_join", "content": "申请 ID 不能为空，sub_type 必须是 add 或 invite"}
         group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
         if group_id <= 0:
@@ -269,9 +274,9 @@ class ToolMixin:
             today = self._today_key()
             self._daily_approve_count.setdefault(group_id, {}).setdefault(today, 0)
             appr_lim, _ = self._get_aa_limits(group_id)
-            if self._daily_approve_count[group_id][today] >= appr_lim: return {"name": "group_approve_join", "content": f"今日已通过 {appr_lim} 个申请，已达上限"}
+            if not await self._owner_unrestricted(group_id) and self._daily_approve_count[group_id][today] >= appr_lim: return {"name": "group_approve_join", "content": f"今日已通过 {appr_lim} 个申请，已达上限"}
             try:
-                ok, data = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=group_id, flag=request_id, approve=True, reason=reason)
+                ok, data = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=group_id, flag=request_id, sub_type=sub_type, approve=True, reason=reason)
                 if not ok: return {"name": "group_approve_join", "content": f"通过申请未能生效: {data}"}
                 self._daily_approve_count[group_id][today] += 1
                 self._mark_tool_executed(group_id, "approve")
@@ -287,9 +292,12 @@ class ToolMixin:
     @Tool("group_reject_join", description="拒绝入群申请（管理员/群主可用），request_id 从 group_get_system_msg 获取", visibility="visible", parameters=[
         ToolParameterInfo(name="group_id", param_type=ToolParamType.INTEGER, description="群号", required=True),
         ToolParameterInfo(name="request_id", param_type=ToolParamType.STRING, description="申请ID (来自 group_get_system_msg)", required=True),
+        ToolParameterInfo(name="sub_type", param_type=ToolParamType.STRING, description="add=入群申请（默认）；invite=入群邀请", required=False),
         ToolParameterInfo(name="reason", param_type=ToolParamType.STRING, description="拒绝原因", required=True),
     ])
-    async def tool_reject_join(self, group_id: int = 0, request_id: str = "", reason: str = "", **kwargs: Any) -> dict[str, Any]:
+    async def tool_reject_join(self, group_id: int = 0, request_id: str = "", reason: str = "", sub_type: str = "add", **kwargs: Any) -> dict[str, Any]:
+        if sub_type not in ("add", "invite") or not request_id:
+            return {"name": "group_reject_join", "content": "申请 ID 不能为空，sub_type 必须是 add 或 invite"}
         group_id = self._resolve_tool_group_id(group_id, kwargs)
         del kwargs
         if group_id <= 0:
@@ -300,9 +308,9 @@ class ToolMixin:
             today = self._today_key()
             self._daily_reject_count.setdefault(group_id, {}).setdefault(today, 0)
             _, rej_lim = self._get_aa_limits(group_id)
-            if self._daily_reject_count[group_id][today] >= rej_lim: return {"name": "group_reject_join", "content": f"今日已拒绝 {rej_lim} 个申请，已达上限"}
+            if not await self._owner_unrestricted(group_id) and self._daily_reject_count[group_id][today] >= rej_lim: return {"name": "group_reject_join", "content": f"今日已拒绝 {rej_lim} 个申请，已达上限"}
             try:
-                ok, data = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=group_id, flag=request_id, approve=False, reason=reason)
+                ok, data = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=group_id, flag=request_id, sub_type=sub_type, approve=False, reason=reason)
                 if not ok: return {"name": "group_reject_join", "content": f"拒绝申请未能生效: {data}"}
                 self._daily_reject_count[group_id][today] += 1
                 self._mark_tool_executed(group_id, "reject")
@@ -440,13 +448,14 @@ class ToolMixin:
             return {"name": "group_get_member", "content": "无效的 group_id 或 user_id（无法确认当前会话群号）"}
         self.ctx.logger.info(f"[群管理] Tool-get-member: group={group_id} user={user_id}")
         async with self._lock:
-            self._get_member_called.setdefault(group_id, {})[user_id] = time.time()
             try:
                 ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=group_id, user_id=user_id, no_cache=True)
                 if ok and isinstance(data, dict):
+                    self._get_member_called.setdefault(group_id, {})[user_id] = time.time()
                     role = data.get("role", "unknown"); card = data.get("card", ""); nick = data.get("nickname", "")
                     title = str(data.get("title", data.get("special_title", "")) or "")
-                    self._known_roles[(group_id, user_id)] = (role, time.time())
+                    if role in ("owner", "admin", "member"):
+                        self._known_roles[(group_id, user_id)] = (role, time.time())
                     role_cn = {"owner": "群主", "admin": "管理员", "member": "普通成员"}.get(role, role)
                     title_text = f", 专属头衔={title}" if title else ""
                     return {"name": "group_get_member", "content": f"@{user_id}: 昵称={nick}, 群名片={card}, 身份={role_cn}({role}){title_text}"}
@@ -467,6 +476,8 @@ class ToolMixin:
         async with self._lock:
             try:
                 ok, data = await self._call_action_api(api_name="adapter.napcat.group.get_group_shut_list", group_id=group_id)
+                if not ok:
+                    return {"name": "group_get_shut_list", "content": f"查询禁言列表未能生效: {data}"}
                 if ok and isinstance(data, dict): return {"name": "group_get_shut_list", "content": f"禁言列表: {data.get('data', data)}"}
                 return {"name": "group_get_shut_list", "content": "该群当前没有被禁言的用户"}
             except Exception:

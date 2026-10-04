@@ -10,7 +10,7 @@ from maibot_sdk import Field, PluginConfigBase
 class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件开关"; __ui_icon__ = "power"; __ui_order__ = 0
     enabled: bool = Field(default=False, description="是否启用插件")
-    config_version: str = Field(default="2.7.0", description="配置版本")
+    config_version: str = Field(default="2.7.1", description="配置版本")
 
 class AdminSectionConfig(PluginConfigBase):
     __ui_label__ = "管理员权限"; __ui_icon__ = "shield"; __ui_order__ = 1
@@ -97,18 +97,18 @@ class PromptsSectionConfig(PluginConfigBase):
     __ui_label__ = "提示词"; __ui_icon__ = "message-square"; __ui_order__ = 9
     auto_moderate_system: str = Field(default=(
         "【群管理】你是本群 Bot，身份：{bot_role}；可用操作：{available_actions}。\n"
-        "处理规则：广告/诈骗→撤回+禁言10-30分；连续刷屏→先提醒，再犯禁言5-10分；辱骂→撤回+禁言1-6小时，再犯踢；"
-        "色情/违法→撤回+踢；优质分享→设精华；不确定→先观察。\n"
-        "执行要求：操作前先调用 group_get_member 确认目标；撤回/精华需先获取 message_id；"
-        "必须真实调用对应 group_* 工具，未调用不得声称已执行；执行后自然回复，不要复述“已将xx禁言”。\n"
+        "处理规则：根据当前证据与严重程度选择提醒、撤回、禁言或踢出；正常聊天不要误判。"
+        "优质分享可设精华；证据不足时先查询或观察。\n"
+        "执行要求：目标身份或 QQ 不确定时先调用 group_get_member 确认；撤回/精华需先获取 message_id；"
+        "必须真实调用对应 group_* 工具，未调用不得声称已执行；执行后根据成功或失败结果简洁回复。\n"
         "正常聊天优先，发现违规再处理。"
     ), description="自动审核系统提示词（Replyer 用）。默认模板只使用 {bot_role}/{available_actions}，发言者/群号由插件动态追加；自定义时也可使用 {sender_role}/{sender_id}")
     planner_moderate_system: str = Field(default=(
         "# 群管理准则\n"
         "Bot 身份：{bot_role}；可用操作：{available_actions}。\n"
-        "处理规则：广告/诈骗→撤回+禁言10-30分；刷屏→先警告，再犯禁言5-10分；辱骂→撤回+禁言1-6小时，再犯踢；"
-        "色情/违法→撤回+踢（管理员先请示群主）；优质分享→设精华；不确定→先观察。\n"
-        "执行要求：操作前先调用 group_get_member；禁言最长1小时，踢出前确认；"
+        "处理规则：按当前证据和严重程度自主选择合适操作；"
+        "优质分享可设精华；不确定先查证。\n"
+        "执行要求：遵循动态身份权限说明；目标不确定先查询；"
         "需执行时本轮直接调用 group_* 工具，未调用不得声称已执行。"
     ), description="规划器系统提示词（Planner 决策用）。默认模板只使用 {bot_role}/{available_actions}，发言者/群号由插件动态追加；自定义时也可使用 {sender_role}/{sender_id}")
     command_denied_message: str = Field(default="你没有权限执行此操作。", description="权限拒绝回复")

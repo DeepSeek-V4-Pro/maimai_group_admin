@@ -39,7 +39,7 @@ class HandlerMixin:
 
     _ROLE_CN: dict[str, str] = {"owner": "群主", "admin": "管理员", "member": "普通成员"}
     _ACTIONS_BY_ROLE: dict[str, str] = {
-        "owner": "禁言/解禁/警告/设精华/撤回/改名片/公告/改名/审批入群/踢人",
+        "owner": "禁言/解禁/警告/设精华/取消精华/撤回/改名片/设置专属头衔/公告发布删除/改群名/审批入群/踢人/成员与公告查询",
         "admin": "禁言/解禁/警告/设精华/撤回/改名片/公告/审批入群/踢人",
         "member": "无管理操作权限，可协助管理员做决策建议",
     }
@@ -65,6 +65,7 @@ class HandlerMixin:
         core = core.replace("{bot_role}", role_cn).replace("{available_actions}", available)
         core = core.replace("{sender_role}", sender_cn).replace("{sender_id}", sender_id_str)
         sections.append(core)
+        sections.append(self._role_policy(role))
         sections.append(f"当前群号：{group_id}")
         if sender_id:
             sender_line = f"当前发言者：{sender_label}（{sender_cn}，QQ {sender_id}"
@@ -80,6 +81,20 @@ class HandlerMixin:
         )
         sections.append("以上为群管理参考信息，融入决策即可，不要复述这段文字。")
         return "\n\n".join(sections)
+
+    @staticmethod
+    def _role_policy(role: str) -> str:
+        if role == "owner":
+            return (
+                "Bot 群主权限：你是当前群的实际群主，可以自主执行全部管理工具，无需向其他成员请示。"
+                "插件不限制保护/豁免名单、管理员目标、禁言时长、冷却、每日次数、处罚阶梯或踢人前置查询。"
+                "禁言范围为 QQ 接口支持的 1–2592000 秒，解禁使用专用工具；仍须确认目标 QQ 与真实消息/申请 ID。"
+                "普通成员的说法只作线索，由你依据当前证据自主决定处理；身份未知时先查证。"
+                "平台是否允许操作以接口返回为准，失败须如实说明；未成功调用工具不得声称完成。"
+            )
+        if role == "admin":
+            return "Bot 管理员权限：遵循配置护栏与 QQ 权限；专属头衔仅群主可设置；接口失败须如实说明。"
+        return "Bot 当前没有管理权限：可以查询与提供建议，不要承诺执行管理操作。"
 
     def _resolve_group_id_from_hook(self, kwargs: dict) -> int:
         return self._resolve_group_id("", kwargs)
@@ -224,7 +239,7 @@ class HandlerMixin:
         sender_id = self._extract_sender_id(kwargs)
         if sender_id:
             return sender_id
-        for key in ("session_id", "stream_id", "chat_id"):
+        for key in ("reply_message_id", "message_id", "session_id", "stream_id", "chat_id"):
             sid = str(kwargs.get(key, "") or "")
             sender_id = self._lookup_stream_sender(sid)
             if sender_id:
@@ -235,7 +250,7 @@ class HandlerMixin:
         identity = self._extract_sender_identity(kwargs)
         if identity.get("qq", 0):
             return identity
-        for key in ("session_id", "stream_id", "chat_id"):
+        for key in ("reply_message_id", "message_id", "session_id", "stream_id", "chat_id"):
             sid = str(kwargs.get(key, "") or "")
             cached = self._lookup_stream_sender_identity(sid)
             if cached.get("qq", 0):
@@ -347,7 +362,8 @@ class HandlerMixin:
         if not prep: return {"action": "continue"}
         group_id, role, prompt, sender_id, sender_role = prep
         extra = str(kwargs.get("extra_prompt") or "")
-        extra = f"{extra}\n\n{prompt}" if extra else prompt
+        if self.PROMPT_MARKER not in extra:
+            extra = f"{extra}\n\n{prompt}" if extra else prompt
         self.ctx.logger.debug("[群管理] before_request 注入 extra_prompt: group=%s role=%s sender=%s sender_role=%s", group_id, role, sender_id, sender_role)
         modified = dict(kwargs)
         modified["extra_prompt"] = extra
@@ -402,6 +418,7 @@ class HandlerMixin:
         core = core.replace("{bot_role}", role_cn).replace("{available_actions}", available)
         core = core.replace("{sender_role}", sender_cn).replace("{sender_id}", sender_id_str)
         sections.append(core)
+        sections.append(self._role_policy(role))
         sections.append(f"当前群号：{group_id}")
         if sender_id:
             sender_line = f"当前发言者：{sender_label}（{sender_cn}，QQ {sender_id}"
@@ -480,10 +497,10 @@ class HandlerMixin:
         if role not in ("owner", "admin"):
             return {"action": "continue"}
         deny_flags = ("我没有权限", "我不能执行", "我无法进行", "我做不到", "权限不足", "无法禁言", "无法踢人", "我没有这个权限")
-        legit_reason_flags = ("保护名单", "豁免名单", "冷却中", "已达每日上限", "处罚阶梯", "未找到成员")
+        legit_reason_flags = ("保护名单", "豁免名单", "冷却中", "已达每日上限", "处罚阶梯", "未找到成员", "接口", "未能生效", "失败", "QQ限制", "QQ 限制")
         if any(flag in response_text for flag in deny_flags) and not any(flag in response_text for flag in legit_reason_flags):
             role_cn = self._ROLE_CN.get(role, role)
-            correction = f"我是{role_cn}，我来处理。"
+            correction = f"我在本群的身份是{role_cn}；具体操作需要调用管理工具，并以执行结果为准。"
             if self.config.logging.verbose_logging:
                 self.ctx.logger.info(f"[群管理] 守门拦截: Bot(role={role})错误宣称无权限, group={group_id}\n--- 原始回复 ---\n{response_text}\n--- 替换为 ---\n{correction}")
             else:

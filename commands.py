@@ -25,8 +25,7 @@ class CommandMixin:
         if gid <= 0:
             await self.ctx.send.text("无法确定当前群号，请使用: /admin status [群号]", stream_id)
             return True, "", True
-        role = self._get_group_role(gid)
-        if role is None and gid: role = await self._ensure_bot_role(gid)
+        role = await self._ensure_bot_role(gid)
         role = role or "未知"
         today = self._today_key()
         mute_cnt = self._daily_mute_count.get(gid, {}).get(today, 0)
@@ -34,6 +33,8 @@ class CommandMixin:
         enabled = "运行中" if self._is_group_enabled(gid) else "已暂停"
         mute_limit = self.config.safeguard.daily_mute_limit
         kick_limit = self.config.safeguard.daily_kick_limit
+        if role == "owner":
+            mute_limit = kick_limit = "不限（Bot 群主完整权限）"
         info = (
             f"群 {gid} 管理面板\n"
             f"身份：{role}\n"
@@ -243,7 +244,7 @@ class CommandMixin:
         sf = self.config.safeguard
         mute_key = (gid, qq)
         last_mute = self._last_mute_time.get(mute_key, 0)
-        if sf.mute_cooldown > 0 and (time.time() - last_mute) < sf.mute_cooldown:
+        if not await self._owner_unrestricted(gid) and sf.mute_cooldown > 0 and (time.time() - last_mute) < sf.mute_cooldown:
             remain = int(sf.mute_cooldown - (time.time() - last_mute))
             await self.ctx.send.text(f"该用户还需等待 {remain} 秒才能再次禁言", stream_id)
             return True, "", True
@@ -253,11 +254,11 @@ class CommandMixin:
             return True, "", True
         if esc and esc.action == "mute":
             duration = min(duration, esc.max_duration)
-        duration = min(duration, sf.max_mute_duration)
+        duration = min(duration, 2592000 if await self._owner_unrestricted(gid) else sf.max_mute_duration)
         await self._check_daily_reset(gid)
         today = self._today_key()
         self._daily_mute_count.setdefault(gid, {}).setdefault(today, 0)
-        if self._daily_mute_count[gid][today] >= sf.daily_mute_limit:
+        if not await self._owner_unrestricted(gid) and self._daily_mute_count[gid][today] >= sf.daily_mute_limit:
             await self.ctx.send.text(f"今天已经禁言了 {sf.daily_mute_limit} 个用户，已达每日上限", stream_id)
             return True, "", True
         ok, _ = await self._call_api(api_name="adapter.napcat.group.set_group_ban", group_id=gid, user_id=qq, duration=duration)
@@ -305,7 +306,7 @@ class CommandMixin:
         await self._check_daily_reset(gid)
         today = self._today_key()
         self._daily_kick_count.setdefault(gid, {}).setdefault(today, 0)
-        if self._daily_kick_count[gid][today] >= self.config.safeguard.daily_kick_limit:
+        if not await self._owner_unrestricted(gid) and self._daily_kick_count[gid][today] >= self.config.safeguard.daily_kick_limit:
             await self.ctx.send.text(f"今天已经踢出了 {self.config.safeguard.daily_kick_limit} 个用户，已达每日上限", stream_id)
             return True, "", True
         ok, _ = await self._call_api(api_name="adapter.napcat.group.set_group_kick", group_id=gid, user_id=qq, reject_add_request=False)

@@ -1,7 +1,7 @@
-"""群管理助手 v2.7.0 — QQ 群的自动小管理员
+"""群管理助手 v2.7.1 — QQ 群的自动小管理员
 
 18 个管理 Tool + 29 个命令入口 + 5 个 HookHandler，支持禁言/解禁/踢人/警告/设精华/撤回/改名片/
-改头衔/改群名/公告发布与删除/入群审批，含 8 步安全护栏 + 按群独立配置。
+改头衔/改群名/公告发布与删除/入群审批，Bot 群主完整权限；管理员保留安全护栏与按群独立配置。
 
 v2.7 修复：MaiBot 新版本（response item 重构）把 Hook 载荷从 messages 改为 items，
 插件注入协议同步升级为 Context Item（SystemMessageItem.parts），并兼容旧版 messages；

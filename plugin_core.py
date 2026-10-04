@@ -162,12 +162,13 @@ class PluginCore(MaiBotPlugin):
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                join_list = item.get("join_requests", item.get("JoinRequest", []))
-                if not join_list:
-                    join_list = item.get("invited_requests", item.get("InvitedRequest", []))
-                if not isinstance(join_list, list):
-                    join_list = [join_list] if join_list else []
-                for req in join_list:
+                requests = []
+                for key, legacy_key, sub_type in (("join_requests", "JoinRequest", "add"), ("invited_requests", "InvitedRequest", "invite")):
+                    entries = item.get(key, item.get(legacy_key, []))
+                    if not isinstance(entries, list):
+                        entries = [entries] if entries else []
+                    requests.extend((req, sub_type) for req in entries)
+                for req, sub_type in requests:
                     if not isinstance(req, dict):
                         continue
                     req_gid = self._to_int(req.get("group_id", req.get("GroupId", gid)))
@@ -204,9 +205,9 @@ class PluginCore(MaiBotPlugin):
                             await self._check_daily_reset(req_gid)
                             today = self._today_key()
                             self._daily_approve_count.setdefault(req_gid, {}).setdefault(today, 0)
-                            if self._daily_approve_count[req_gid][today] >= appr_lim:
+                            if not await self._owner_unrestricted(req_gid) and self._daily_approve_count[req_gid][today] >= appr_lim:
                                 continue
-                            ok2, _ = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=req_gid, flag=request_id, approve=True)
+                            ok2, _ = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=req_gid, flag=request_id, sub_type=sub_type, approve=True)
                             if ok2:
                                 self._daily_approve_count[req_gid][today] += 1
                                 self._add_log(req_gid, "approve", self._to_int(user_id), "自动通过", True)
@@ -220,10 +221,10 @@ class PluginCore(MaiBotPlugin):
                             await self._check_daily_reset(req_gid)
                             today = self._today_key()
                             self._daily_reject_count.setdefault(req_gid, {}).setdefault(today, 0)
-                            if self._daily_reject_count[req_gid][today] >= rej_lim:
+                            if not await self._owner_unrestricted(req_gid) and self._daily_reject_count[req_gid][today] >= rej_lim:
                                 continue
                             reason = "含拒绝关键词" if reject_match else "自动拒绝"
-                            ok2, _ = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=req_gid, flag=request_id, approve=False, reason=reason)
+                            ok2, _ = await self._call_action_api(api_name="adapter.napcat.group.set_group_add_request", group_id=req_gid, flag=request_id, sub_type=sub_type, approve=False, reason=reason)
                             if ok2:
                                 self._daily_reject_count[req_gid][today] += 1
                                 self._add_log(req_gid, "reject", self._to_int(user_id), reason, True)
@@ -398,18 +399,18 @@ class PluginCore(MaiBotPlugin):
     async def _call_api(self, api_name: str, **api_args: Any) -> tuple[bool, Any]:
         try:
             result = await self.ctx.api.call(api_name=api_name, version="1", **api_args)
+            if result is None:
+                return False, "接口返回空结果"
+            if isinstance(result, dict):
+                if result.get("status") in ("failed", "error") or result.get("retcode", 0) not in (0, "0", None):
+                    return False, result
             return True, result
         except Exception as e:
             self.ctx.logger.warning(f"[群管理] API调用失败: {api_name}: {e}")
             return False, str(e)
 
     async def _call_action_api(self, api_name: str, **params: Any) -> tuple[bool, Any]:
-        try:
-            result = await self.ctx.api.call(api_name=api_name, version="1", params=params)
-            return True, result
-        except Exception as e:
-            self.ctx.logger.warning(f"[群管理] API调用失败: {api_name}: {e}")
-            return False, str(e)
+        return await self._call_api(api_name, params=params)
 
     async def _check_daily_reset(self, group_id: int):
         today = self._today_key()
@@ -496,6 +497,9 @@ class PluginCore(MaiBotPlugin):
         return "\n".join(lines)
 
     async def _is_protected(self, group_id: int, user_id: int, chain: dict[str, Any] | None = None) -> tuple[bool, str]:
+        if await self._owner_unrestricted(group_id):
+            self._chain_add(chain, "Bot 群主完整权限", True, "跳过插件保护名单与管理员豁免；操作结果以 QQ 接口为准")
+            return False, ""
         def add(step: str, passed: bool, detail: str = "") -> None:
             self._chain_add(chain, step, passed, detail)
         user_str = str(user_id)
@@ -519,6 +523,10 @@ class PluginCore(MaiBotPlugin):
             add("自动豁免群主/管理员", False, "auto_exempt_admins=false")
         return False, ""
 
+    async def _owner_unrestricted(self, group_id: int) -> bool:
+        """仅 Bot 自身为群主时放开插件限制，不改变命令发送者授权。"""
+        return await self._ensure_bot_role(group_id) == "owner"
+
     async def _ensure_bot_role(self, group_id: int) -> Optional[str]:
         existing = self._get_group_role(group_id)
         refresh_interval = max(self.config.identity.bot_role_refresh_seconds, 60)
@@ -531,6 +539,11 @@ class PluginCore(MaiBotPlugin):
                     self_id = self._to_int(self.config.identity.bot_qq)
                 if not self_id:
                     self_id = self._bot_self_id
+                if not self_id:
+                    ok, login = await self._call_api(api_name="adapter.napcat.system.get_login_info")
+                    if ok and isinstance(login, dict):
+                        self_id = self._to_int(login.get("user_id"))
+                        self._bot_self_id = self_id or None
                 if not self_id:
                     return None
                 ok, data = await self._call_api(api_name="adapter.napcat.group.get_group_member_info", group_id=group_id, user_id=self_id, no_cache=True)
@@ -590,6 +603,7 @@ class PluginCore(MaiBotPlugin):
         return sum(1 for e in self._op_log if e["group_id"] == group_id and e["target_user_id"] == user_id and e["action"] in ("warn", "mute", "kick") and datetime.fromisoformat(e["timestamp"]) > cutoff)
 
     def _check_escalation(self, group_id: int, user_id: int) -> Optional[EscalationStepConfig]:
+        if self._get_group_role(group_id) == "owner": return None
         if not self.config.escalation.enabled: return None
         steps = self.config.escalation.escalation_steps
         if not steps: return None
